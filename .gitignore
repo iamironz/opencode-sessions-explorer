@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.tgz
+.ck/
+coverage/
+.DS_Store
+.bun
+*.log
+.env
+logs/

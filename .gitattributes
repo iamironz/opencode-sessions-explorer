@@ -1,0 +1,9 @@
+# Normalize line endings to LF on checkout/commit.
+* text=auto eol=lf
+
+# Source is always text.
+*.ts text
+
+# Generated artifacts — keep out of diffs and language stats.
+bun.lock linguist-generated=true
+dist/** linguist-generated=true

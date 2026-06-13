@@ -1,0 +1,31 @@
+{
+  "sessions": {
+    "active": "ses_1a13f77cbffe1Zsrdm4Lp149hA",
+    "archived": "ses_1c5d6463fffestt8Qcu7iYsj75",
+    "deep_parent": "ses_1e8b38197ffeftCR8DSGqi9Ecp",
+    "big_part": "ses_221a7b55affe75ro8obaP5bnC7",
+    "pre_migration": "ses_52057500effeWkbFgvuxtrwF2h",
+    "missing": "ses_does_not_exist_xyz"
+  },
+  "messages": {
+    "active_first_user": "msg_e5ec088390016sqvh9vSTNg37N",
+    "big_message_150mb": "msg_df2dc767b001T2uwKyvPMX54aD",
+    "missing": "msg_does_not_exist_xyz"
+  },
+  "parts": {
+    "text_active": "prt_e5ec0883c002Vl85aEmIR4sBDK",
+    "tool_completed": "prt_e5ec0985c001eE9U21ykYgvKAW",
+    "tool_error": "prt_e5ecc8125001B908bzcCp62Nno",
+    "big_5mb_patch": "prt_df320c316001jU3TGCB0uH2MdV",
+    "tool_with_outputpath": "prt_c4293bfbc001p6GebCGcGYTxtr",
+    "missing": "prt_does_not_exist_xyz"
+  },
+  "phrases": {
+    "active_known": "Submit PR review"
+  },
+  "expected_counts": {
+    "session_min": 2500,
+    "message_min": 50000,
+    "part_min": 240000
+  }
+}

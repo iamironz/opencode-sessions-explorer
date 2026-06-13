@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/iamironz/opencode-sessions-explorer/blob/main/README.md
+    about: Read the README, tool catalog, and quick start
+  - name: Contributing
+    url: https://github.com/iamironz/opencode-sessions-explorer/blob/main/CONTRIBUTING.md
+    about: Contribution workflow and expectations
+  - name: Triage policy
+    url: https://github.com/iamironz/opencode-sessions-explorer/blob/main/docs/maintainers/triage.md
+    about: How issues are labeled and handled
+  - name: Security policy
+    url: https://github.com/iamironz/opencode-sessions-explorer/blob/main/.github/SECURITY.md
+    about: Report vulnerabilities responsibly

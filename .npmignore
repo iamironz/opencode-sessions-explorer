@@ -1,0 +1,13 @@
+# Source not shipped — only dist/
+src/
+tests/
+examples/
+docs/
+.github/
+.vscode/
+.bun
+*.log
+*.tgz
+.gitignore
+tsconfig.json
+bunfig.toml
