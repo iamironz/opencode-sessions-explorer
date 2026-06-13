@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-06-13
+
 ### Changed
-- Clarified install, source-dev, and first-run docs, including plugin registration
-  troubleshooting, platform-specific database paths, and export/index setup.
+- Clarified installation, source-dev, and first-run docs, including plugin
+  registration troubleshooting, platform-specific database paths, and export/index
+  setup; shipped `docs/` in the npm package so README guide links resolve for
+  package consumers.
 
 ## [0.1.1] - 2026-06-13
 
