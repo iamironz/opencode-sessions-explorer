@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Documentation restructure: organized the `docs/` tree (getting started, install, guides,
+  reference, support, maintainers) and reworked `README.md` into a concise entry point that
+  links out to the new docs.
+
 ## [0.1.0] - 2026-06-13
 
 Initial public release on npm.

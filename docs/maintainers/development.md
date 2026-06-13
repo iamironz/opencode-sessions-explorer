@@ -86,8 +86,8 @@ session at non-default locations:
   bun run test:live
   ```
 
-  Live runs read real `ses_/msg_/prt_` IDs and minimum counts from your machine;
-  failures there reflect your local data, not necessarily a regression.
+  Live runs read real `ses_/msg_/prt_` IDs and minimum counts from your OpenCode
+  database; failures there reflect your own data, not necessarily a regression.
 
 ## The `.js`-Import Gotcha (do not "fix" it)
 

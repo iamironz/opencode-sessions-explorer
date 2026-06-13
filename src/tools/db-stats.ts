@@ -11,7 +11,7 @@ import { runWithEnvelope } from "../lib/envelope.js"
 
 export const dbStats = tool({
   description:
-    "opencode-sessions-explorer: health probe for the local OpenCode SQLite database (~/.local/share/opencode/opencode.db). " +
+    "opencode-sessions-explorer: health probe for the OpenCode SQLite database (~/.local/share/opencode/opencode.db). " +
     "Returns migration head, table counts (session/message/part), json1 extension status, busy_timeout, and any schema-drift warnings. " +
     "Run this when troubleshooting: any opencode-sessions-explorer-* tool returning SCHEMA_DRIFT, after an OpenCode upgrade, when verifying the DB is reachable, or when answering 'is opencode.db healthy / what schema is it on / how many sessions are stored'.",
   args: {},

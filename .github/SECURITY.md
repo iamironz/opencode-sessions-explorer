@@ -20,7 +20,7 @@ We aim to acknowledge reports within 3 business days.
 
 ## Data Exposure and Redaction Surface
 
-This plugin exposes your local OpenCode session history to the running LLM, and
+This plugin exposes your OpenCode session history to the running LLM, and
 that history can include credentials, API tokens, and file contents captured by
 past tool calls. Two surfaces reduce accidental disclosure by default:
 
@@ -34,7 +34,7 @@ past tool calls. Two surfaces reduce accidental disclosure by default:
   rejected.
 
 All access is local and read-only except the single `unarchive-session` write;
-no data leaves your machine through this plugin.
+no data leaves your device through this plugin.
 
 ## Supported Versions
 

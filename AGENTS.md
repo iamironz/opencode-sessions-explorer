@@ -18,7 +18,9 @@ catalog; `CHANGELOG.md` tracks status.
 | E2E verify vs SQL    | `bun tests/verify-end-to-end.ts`         |
 | Install health probe | `bun src/bin/check-deps.ts`              |
 
-There is **no CI** — `.github/workflows/` is empty. All verification is manual.
+CI runs in GitHub Actions: `.github/workflows/ci.yml` runs typecheck, build, the
+hermetic test suite, the end-to-end verify, and `pack:dry` on ubuntu + macos;
+`publish.yml` publishes to npm on `v*` tags; `labels.yml` syncs issue labels.
 
 ## Required workflow before declaring work done
 

@@ -1,8 +1,8 @@
 /**
  * opencode-sessions-explorer plugin — entry point.
  *
- * Registers 18 tools that give the OpenCode LLM access to every prior OpenCode
- * session on this machine: recall, search/grep, and historical analysis (17
+ * Registers 18 tools that give the OpenCode LLM access to your OpenCode
+ * session history: recall, search/grep, and historical analysis (17
  * read-only) plus one deliberate write (`unarchive-session`). See README.md for
  * the full tool catalog and intent triggers.
  *
