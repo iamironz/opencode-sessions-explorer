@@ -28,11 +28,11 @@ grant the one permission it needs to read the OpenCode session database.
    `~/.cache/opencode/node_modules`, so there is no separate install command.
 
 1. (Optional) Pin a version to avoid surprise upgrades by appending the version to
-   the package spec:
+   the package spec (for example, the current latest):
 
    ```jsonc
    {
-     "plugin": ["opencode-sessions-explorer@0.1.0"]
+     "plugin": ["opencode-sessions-explorer@0.1.1"]
    }
    ```
 

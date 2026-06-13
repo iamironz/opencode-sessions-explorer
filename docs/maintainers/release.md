@@ -30,7 +30,7 @@ Use [SemVer](https://semver.org/spec/v2.0.0.html):
 1. Confirm the **CI** workflow (`.github/workflows/ci.yml`) is green on the
    commit you intend to tag.
 1. Commit the version bump and changelog (for example
-   `chore(release): v0.1.0`).
+   `chore(release): vX.Y.Z`).
 1. Create an annotated tag and push it:
 
    ```bash
