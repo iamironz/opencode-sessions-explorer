@@ -17,15 +17,44 @@ Two commands cover the health of every layer the plugin depends on.
    bunx opencode-sessions-explorer-check-deps
    ```
 
-   This reports database reachability, the json1 extension, schema head and drift,
-   export tree presence, and whether `ck` is available. Add `--json` for
-   machine-readable output.
+   This reports database reachability, schema head and drift, SQLite `json1`,
+   `busy_timeout`, export tree presence, curated channel views, `ck` CLI, `ck`
+   index, and the tool-output directory. Add `--json` for machine-readable output.
 
 2. Probe the database from inside OpenCode with the `db-stats` tool. It returns the
-   migration head, table counts, json1 status, and any schema-drift warnings.
+   migration head, table counts, json1 status, `busy_timeout`, and any schema-drift
+   warnings.
 
 If both come back clean, the plugin core is healthy and the issue is likely scoped
 to one tool or to the optional `ck` search path.
+
+## Plugin Tools Do Not Appear After Config Change
+
+OpenCode starts, but the `opencode-sessions-explorer-*` tools are not available to
+the model after editing config.
+
+Quick checks:
+
+- Confirm you edited the active OpenCode config path, usually
+  `~/.config/opencode/opencode.json`.
+- Confirm the `plugin` array contains either the package spec
+  (`"opencode-sessions-explorer"` or a pinned version) or an absolute local path.
+- Confirm you fully quit and restarted OpenCode; do not assume plugin hot reload.
+- If using source TypeScript, confirm the path to `src/plugin.ts` exists.
+- If using built JavaScript, confirm `bun run build` produced `dist/plugin.js`.
+- Confirm `src/plugin.ts` exports only the plugin function; extra non-function
+  exports can make OpenCode reject the plugin entrypoint.
+
+Fix:
+
+- Correct the config, then fully restart OpenCode.
+- For source checkouts, see the supported source TS and built JS options in
+  [install.md#from-source-dev](../install.md#from-source-dev).
+- If a local source path still fails, run a local import check from the checkout:
+
+  ```bash
+  bun -e 'import("./src/plugin.ts").then((m) => { if (typeof m.default !== "function") throw new Error("default export is not a function") })'
+  ```
 
 ## Search Returns CK_NOT_FOUND
 
@@ -52,13 +81,14 @@ A tool returns `DB_NOT_FOUND`, or `check-deps` fails the "OpenCode DB" line.
 Quick checks:
 
 - Confirm the database exists at the default path
-  (`~/.local/share/opencode/opencode.db` on macOS/Linux).
+  (`~/.local/share/opencode/opencode.db` on common macOS/Linux installs).
 - Confirm OpenCode has run at least once so the database has been created.
 
 Fix:
 
 - If the database lives elsewhere, set `OPENCODE_SESSIONS_EXPLORER_DB` to its
-  absolute path.
+  absolute path. If `$XDG_DATA_HOME` or Windows `%LOCALAPPDATA%` changes the data
+  root, use that actual path.
 - If the path is correct but access is blocked, add the `external_directory`
   permission rule (next block) and restart OpenCode.
 - See [configuration.md](../reference/configuration.md) for the full override table.
@@ -89,6 +119,34 @@ Fix:
   bodies, and confirm `role` is `any`. See
   [search-surfaces.md](../reference/search-surfaces.md).
 
+## grep-session Returns INDEX_MISSING
+
+`grep-session` returns `INDEX_MISSING`, usually with a message that the session is
+not in the export tree.
+
+Quick checks:
+
+- Verify the `session_id` is correct with `get-session` or `list-sessions`.
+- Confirm the export tree exists and includes that session under `by-session/`.
+- If you requested a curated surface/channel, confirm channel views are complete in
+  `check-deps`.
+
+Fix:
+
+- Run the one-time export, then retry `grep-session`:
+
+  ```bash
+  bunx opencode-sessions-explorer-bulk-export
+  ```
+
+- If the session is very new, retry after the tool's auto-sync has had a chance to
+  export recent parts.
+- If channel views are partial or missing, rebuild them:
+
+  ```bash
+  bunx opencode-sessions-explorer-bulk-export --reset
+  ```
+
 ## Permission Denied / external_directory
 
 A tool cannot reach the database even though the path is correct, or OpenCode
@@ -115,7 +173,11 @@ Fix:
   ```
 
 - The database lives outside your project workspace, so this rule is required. The
-  change only takes effect after a full restart. See
+  default snippet covers the common macOS/Linux path. If `$XDG_DATA_HOME`, Windows
+  `%LOCALAPPDATA%`, or `OPENCODE_SESSIONS_EXPLORER_DB` points elsewhere, allow the
+  actual containing directory and restart. Some global configs use
+  `external_directory: "allow"`; that also permits access, but a scoped allow rule is
+  preferred for normal users. The change only takes effect after a full restart. See
   [configuration.md](../reference/configuration.md).
 
 ## Schema Drift Warnings

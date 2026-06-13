@@ -99,7 +99,7 @@ maintaining the search export and for verifying install health.
 | --- | --- |
 | `opencode-sessions-explorer-bulk-export` | Materializes (and incrementally refreshes) the filesystem search export tree. `--reset` rebuilds from scratch; `--root <path>` targets a non-default export root. |
 | `opencode-sessions-explorer-dedupe-export` | One-shot maintenance that removes duplicate part files (same part id, different sequence prefix). Dry-run by default; pass `--apply` to delete. |
-| `opencode-sessions-explorer-check-deps` | Install health probe: database reachability, json1 extension, schema head and drift, export tree presence, and `ck` availability. `--json` emits machine-readable output. |
+| `opencode-sessions-explorer-check-deps` | Install health probe: database reachability, schema head and drift, SQLite `json1`, `busy_timeout`, export tree, channel views, `ck` CLI and index, and tool-output directory. `--json` emits machine-readable output. |
 
 ## Examples
 
@@ -122,9 +122,10 @@ Search all sessions for a topic, rolled up per session:
 opencode-sessions-explorer-search-text { "q": "retry backoff", "group_by_session": true }
 ```
 
-Materialize the search export once, then verify the install:
+Fresh install health flow:
 
 ```bash
+bunx opencode-sessions-explorer-check-deps  # warnings for missing export/ck are okay initially
 bunx opencode-sessions-explorer-bulk-export
 bunx opencode-sessions-explorer-check-deps
 ```

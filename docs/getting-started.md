@@ -9,8 +9,8 @@ history, then branch into the right workflow guide.
 
 | Area | Requirement |
 | --- | --- |
-| OpenCode | A working OpenCode install that has run at least once (it owns the source database) |
-| Bun | `>= 1.0` runtime; the plugin uses `bun:sqlite`. OpenCode ships Bun, so a standalone install is only needed to run the bundled CLIs directly |
+| OpenCode | A working OpenCode install that has run at least once (it owns the source database) and a plugin host compatible with `@opencode-ai/plugin >= 1.15.0` |
+| Bun | `>= 1.0` runtime; the plugin uses `bun:sqlite`, which should include SQLite `json1`. OpenCode ships Bun, so a standalone install is only needed to run the bundled CLIs directly. `check-deps` / `db-stats` verify it. |
 | `ck` (optional) | [`ck`](https://github.com/BeaconBay/ck) `>= 0.7`, required only by `search-text` and `grep-session`; the other 16 tools work without it |
 
 ## Steps
@@ -31,10 +31,22 @@ history, then branch into the right workflow guide.
    ```
 
    The `external_directory` allow rule is required because the OpenCode database
-   lives outside your project workspace.
+   lives outside your project workspace. This snippet covers the common macOS/Linux
+   default path. If `$XDG_DATA_HOME`, Windows `%LOCALAPPDATA%`, or
+   `OPENCODE_SESSIONS_EXPLORER_DB` points elsewhere, allow the actual containing
+   directory and restart OpenCode. Some global configs use
+   `external_directory: "allow"`; that also permits access, but the scoped path rule
+   is preferred for normal users.
 
 1. Quit and restart OpenCode. It auto-installs npm plugins with Bun on startup, so
    there is no separate `npm install` step, and all 18 tools auto-register.
+
+1. Run the install health probe before exporting. Warnings for a missing export
+   tree, missing `ck`, or missing `ck` index are expected on a fresh install:
+
+   ```bash
+   bunx opencode-sessions-explorer-check-deps
+   ```
 
 1. Materialize the searchable export tree once so content search has data to scan:
 
@@ -43,23 +55,26 @@ history, then branch into the right workflow guide.
    ```
 
 1. (Optional) Build the semantic index to enable `mode:'sem'` and `mode:'hybrid'`
-   search. This is a slow, one-time pass:
+   search. This is a slow, one-time pass. Run it in the export root, not in the
+   repository checkout:
 
    ```bash
-   cd ~/.local/share/opencode-sessions-explorer && ck --index .
+   cd ~/.local/share/opencode-sessions-explorer
+   ck --index .  # run in the export root, not the repo root
    ```
 
-## Validate
-
-1. Run the install health probe and confirm no hard failures:
+1. Run the install health probe again and confirm there are no hard failures:
 
    ```bash
    bunx opencode-sessions-explorer-check-deps
    ```
 
-   It reports the database, schema, export tree, and `ck` status. Exit code `0`
-   means all green, `1` means optional pieces are missing, and `2` means the plugin
-   cannot work yet.
+## Validate
+
+1. Read the final `check-deps` output. It reports database reachability, schema and
+   drift, SQLite `json1`, `busy_timeout`, export tree, channel views, `ck` CLI,
+   `ck` index, and tool-output directory status. Exit code `0` means all green, `1`
+   means optional pieces are missing, and `2` means the plugin cannot work yet.
 
 1. In OpenCode, ask an orientation question such as "what session am I in?" — the
    model routes to `current-session` and returns this session's id, agent, model,

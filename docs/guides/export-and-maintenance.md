@@ -36,7 +36,7 @@ maintenance.
 | --- | --- | --- |
 | `opencode-sessions-explorer-bulk-export` | Build or resume the export tree | Idempotent and resumable via `.last_sync`; `--reset` starts from scratch and rebuilds curated `by-channel/` views; `--root <path>` targets a non-default export root |
 | `opencode-sessions-explorer-dedupe-export` | Remove duplicate part files from an older cursor-migration bug | Dry-run by default (reports only); pass `--apply` to actually delete, keeping the lowest-seq file per part |
-| `opencode-sessions-explorer-check-deps` | Probe install health | Checks DB, schema/drift, export tree, channel views, and `ck`; `--json` for machine output; exit codes `0` ok, `1` soft warning, `2` hard fail |
+| `opencode-sessions-explorer-check-deps` | Probe install health | Checks DB, schema/drift, SQLite `json1`, `busy_timeout`, export tree, channel views, `ck` CLI, `ck` index, and tool-output dir; `--json` for machine output; exit codes `0` ok, `1` soft warning, `2` hard fail |
 | `db-stats` (tool) | Inspect database health from inside OpenCode | Returns migration head, table counts, json1 status, `busy_timeout`, and schema-drift warnings |
 
 ## Recommended Flow
@@ -55,10 +55,12 @@ maintenance.
    ```
 
 1. (Optional) Build the semantic index to unlock `sem` and `hybrid` search modes.
-   This is slow and only needs to run once:
+   This is slow and only needs to run once. Run `ck --index .` from the export root,
+   not from the repository checkout:
 
    ```bash
-   cd ~/.local/share/opencode-sessions-explorer && ck --index .
+   cd ~/.local/share/opencode-sessions-explorer
+   ck --index .  # run in the export root, not the repo root
    ```
 
 1. Verify everything is wired up, and re-run after any OpenCode upgrade:

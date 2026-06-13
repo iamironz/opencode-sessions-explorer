@@ -91,7 +91,8 @@ Materialize the export tree (L2), then build the optional `ck` index (L3):
 
 ```bash
 bunx opencode-sessions-explorer-bulk-export
-ck --index .   # run inside the export root to enable semantic search
+cd ~/.local/share/opencode-sessions-explorer
+ck --index .   # run in the export root, not the repository checkout
 ```
 
 Verify all four layers are healthy:

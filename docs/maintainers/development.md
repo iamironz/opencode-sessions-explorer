@@ -9,7 +9,9 @@ gotchas for `opencode-sessions-explorer`.
 
 - [Bun](https://bun.sh) >= 1.0. OpenCode ships Bun; install it standalone only if
   you run the bundled CLIs directly. The runtime is Bun, not Node — the plugin
-  uses `bun:sqlite`.
+  uses `bun:sqlite`, which should include SQLite `json1`; `check-deps` / `db-stats`
+  verify it.
+- An OpenCode plugin host compatible with `@opencode-ai/plugin >= 1.15.0`.
 - [`ck`](https://github.com/BeaconBay/ck) >= 0.7 — required only when working on
   `search-text` / `grep-session`; the other 16 tools work without it.
 - A populated OpenCode SQLite DB at `~/.local/share/opencode/opencode.db` —
@@ -18,12 +20,13 @@ gotchas for `opencode-sessions-explorer`.
 ## Local Setup
 
 ```bash
-bun install
+bun install --frozen-lockfile
 ```
 
 Load the plugin into a running OpenCode while iterating by pointing the config at
-your local checkout (see the "From source (dev)" section of the
-[README](../../README.md)).
+your local checkout. Use the source TypeScript or built JavaScript options in
+[Install: From Source (Dev)](../install.md#from-source-dev); that page is the
+authoritative source-dev registration flow, including the full-restart requirement.
 
 ## Local Dev Loop
 
@@ -46,6 +49,11 @@ Check install health any time:
 bun src/bin/check-deps.ts
 ```
 
+For source-dev first-run validation, use the local checkout CLIs from
+[Install](../install.md#validate) (`bun src/bin/check-deps.ts`,
+`bun src/bin/bulk-export.ts`, or `bun dist/bin/check-deps.js` after a build) rather
+than `bunx`, which exercises the published npm package.
+
 ## Architecture (pointer)
 
 The plugin is a 4-layer pipeline:
@@ -57,9 +65,10 @@ SQLite DB (read-only source of truth)
   -> enriched response (re-fetches session/part metadata from SQLite per hit)
 ```
 
-See the [Architecture section of the README](../../README.md#architecture-4-layers)
-for the full layer diagram and the read-only / single-writer invariants. `AGENTS.md`
-holds the authoritative per-tool contract.
+See the [Architecture Reference](../reference/architecture.md) for the full layer
+diagram and read-only / single-writer invariants, and the
+[Export And Maintenance Guide](../guides/export-and-maintenance.md) for export/index
+operations. `AGENTS.md` holds the authoritative per-tool contract.
 
 ## Environment Overrides
 
@@ -126,5 +135,6 @@ See `AGENTS.md` for the authoritative, fully detailed version of this contract.
 ## Related Docs
 
 - [Docs Writing Standard](docs-writing.md)
+- [Install Guide](../install.md)
 - [Release Guide](release.md)
 - [Triage Guide](triage.md)

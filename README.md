@@ -27,14 +27,14 @@ Unarchive session ses_… so I can open it again.
 
 | Area | Support | Notes |
 | --- | --- | --- |
-| OpenCode | Plugin host | Loads the plugin and owns the source database |
-| Bun | `>= 1.0` | Runtime; the plugin uses `bun:sqlite` (OpenCode ships Bun) |
+| OpenCode | Plugin host compatible with `@opencode-ai/plugin >= 1.15.0` | Loads the plugin and owns the source database |
+| Bun | `>= 1.0` | Runtime; the plugin uses `bun:sqlite` (OpenCode ships Bun), which should include SQLite `json1`; `check-deps` / `db-stats` verify it |
 | `ck` | `>= 0.7`, optional | Only `search-text` / `grep-session` need it; the other 16 tools work without it |
 | OS | macOS / Linux | Windows paths resolve via `%LOCALAPPDATA%` |
 
 ## Quick Start
 
-1. Add the plugin and grant access to the OpenCode data directory, then restart:
+1. Add the plugin and grant access to the OpenCode data directory:
 
 ```jsonc
 // ~/.config/opencode/opencode.json
@@ -49,12 +49,38 @@ Unarchive session ses_… so I can open it again.
 }
 ```
 
+The `external_directory` snippet covers the common macOS/Linux default path. If
+`$XDG_DATA_HOME`, Windows `%LOCALAPPDATA%`, or
+`OPENCODE_SESSIONS_EXPLORER_DB` points elsewhere, allow the actual containing
+directory and restart OpenCode. Some existing global configs use
+`external_directory: "allow"`; that also permits access, but the scoped path rule
+above is preferred for normal users.
+
 1. **Quit and restart OpenCode.** All 18 tools auto-register. OpenCode auto-installs
    npm plugins with Bun on startup, so there is no separate `npm install` step.
-1. Materialize the search export once, then verify the install:
+1. Run the health probe once. Warnings for the missing export tree, missing `ck`, or
+   missing `ck` index are okay at this stage:
+
+```bash
+bunx opencode-sessions-explorer-check-deps
+```
+
+1. Materialize the search export once:
 
 ```bash
 bunx opencode-sessions-explorer-bulk-export
+```
+
+1. (Optional) Build the `ck` index from the export root, not the repo root:
+
+```bash
+cd ~/.local/share/opencode-sessions-explorer
+ck --index .  # run in the export root, not the repo root
+```
+
+1. Run the health probe again to confirm the export and optional index state:
+
+```bash
 bunx opencode-sessions-explorer-check-deps
 ```
 

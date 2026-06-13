@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Clarified install, source-dev, and first-run docs, including plugin registration
+  troubleshooting, platform-specific database paths, and export/index setup.
+
 ## [0.1.1] - 2026-06-13
 
 ### Changed

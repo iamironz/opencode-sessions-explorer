@@ -7,7 +7,10 @@ runtime is Bun, not Node).
 ## Requirements
 
 - [Bun](https://bun.sh) `>= 1.0` (OpenCode ships Bun; install it standalone only if you run
-  the bundled CLIs directly).
+  the bundled CLIs directly; `bun:sqlite` should include SQLite `json1`, and
+  `check-deps` / `db-stats` verify it).
+- An OpenCode plugin host compatible with `@opencode-ai/plugin >= 1.15.0` for runtime
+  validation.
 - [`ck`](https://github.com/BeaconBay/ck) `>= 0.7` — only if you work on `search-text` /
   `grep-session`; the other 16 tools work without it.
 - A populated OpenCode SQLite DB — only for live testing (the suite is hermetic by default).
@@ -15,12 +18,13 @@ runtime is Bun, not Node).
 ## Workflow
 
 ```bash
-bun install
+bun install --frozen-lockfile
 bun run typecheck   # tsc --noEmit (strict mode)
 bun test            # hermetic by default
 bun run build       # bundle to dist/
 ```
 
+For source-dev plugin registration, use [docs/install.md#from-source-dev](docs/install.md#from-source-dev).
 For the full local dev loop, the 4-layer architecture, environment overrides, hermetic vs
 live testing, and the `.js`-import gotcha (sibling imports in `src/` use `.js` even though
 the files are `.ts`), see [docs/maintainers/development.md](docs/maintainers/development.md).

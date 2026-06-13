@@ -35,6 +35,21 @@ with `DB_NOT_FOUND` or a permission error. The change takes effect only after a 
 OpenCode restart. See [Permission Denied / external_directory](../support/troubleshooting.md#permission-denied--external_directory)
 if a tool still cannot reach the database after adding the rule.
 
+The snippet above covers the common macOS/Linux default path. If `$XDG_DATA_HOME`,
+Windows `%LOCALAPPDATA%`, or `OPENCODE_SESSIONS_EXPLORER_DB` points to another
+database location, allow the actual directory that contains `opencode.db` and
+restart OpenCode. Some existing global configs may set `external_directory: "allow"`;
+that grants broad access and is useful for local power users, but the scoped path
+rule is preferred for normal installs.
+
+## Runtime Compatibility
+
+The plugin targets the OpenCode plugin host contract provided by
+`@opencode-ai/plugin >= 1.15.0`. It runs on Bun and uses `bun:sqlite`, which should
+include SQLite `json1`; the bundled health probes (`check-deps` CLI and `db-stats`
+tool) verify `json1`, schema drift, and database runtime settings for the active
+OpenCode database.
+
 ## Environment Overrides
 
 Every path the plugin uses is overridable through an environment variable. These are
