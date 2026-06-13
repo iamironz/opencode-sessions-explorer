@@ -7,10 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-06-13
+
 ### Changed
 - Documentation restructure: organized the `docs/` tree (getting started, install, guides,
   reference, support, maintainers) and reworked `README.md` into a concise entry point that
   links out to the new docs.
+- Generalized the product descriptions and wording across `package.json`, `README.md`, and
+  the docs tree so they are non-parochial (removed machine- and author-specific phrasing).
+  No runtime or API changes.
 
 ## [0.1.0] - 2026-06-13
 
