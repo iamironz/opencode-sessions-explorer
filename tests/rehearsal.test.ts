@@ -634,17 +634,24 @@ describe.skipIf(!LIVE)("search_text", () => {
 })
 
 // --- Phase 5 reindex probes — Layer-2 (filesystem export) update propagation ---
-import { runExport, getLastSync, _resetExportCacheForTest, exportRoot } from "../src/lib/export.ts"
+import { runExport, getSyncState, _resetExportCacheForTest, exportRoot } from "../src/lib/export.ts"
 import { readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs"
 import { join } from "node:path"
 // Export-propagation over a fully materialized tree → live corpus only.
 describe.skipIf(!LIVE)("L2 reindex (export update propagation)", () => {
-  test("RX-H .last_sync uses v2 schema (time_updated cursor)", () => {
+  test("RX-H .last_sync uses v3 schema (id + session cursor state)", () => {
     const root = exportRoot()
     const p = join(root, ".last_sync")
     if (existsSync(p)) {
       const raw = readFileSync(p, "utf8").trim()
-      expect(raw.startsWith("v2 ")).toBe(true)
+      const state = getSyncState(root)
+      expect(raw.startsWith("v3 ")).toBe(true)
+      expect(state.schema).toBe("v3")
+      expect(typeof state.insert_cursor.id).toBe("string")
+      if (state.session_cursor) {
+        expect(Number.isFinite(state.session_cursor.ts)).toBe(true)
+        expect(typeof state.session_cursor.id).toBe("string")
+      }
     }
   })
   test("RX-O re-exporting a part OVERWRITES its existing file (no duplicates)", async () => {
@@ -664,12 +671,12 @@ describe.skipIf(!LIVE)("L2 reindex (export update propagation)", () => {
     // Reset in-process file index so next sync re-reads the dir
     _resetExportCacheForTest()
 
-    // Position the cursor JUST BEFORE the target part's time_updated so the
-    // sync hits it immediately (full-corpus scan wouldn't fit in the budget).
+    // Position the v3 session-dirty cursor just before the target session's
+    // (time_updated,id) point, while advancing the insert id cursor past known parts.
     const { stmt: dbStmt } = await import("../src/lib/db.ts")
-    const row = dbStmt(`SELECT time_updated FROM part WHERE id = ?`).get(partId) as any
+    const row = dbStmt(`SELECT time_updated FROM session WHERE id = ?`).get(sesId) as any
     expect(row).toBeTruthy()
-    const cursor = { ts: Number(row.time_updated) - 1, id: "" }
+    const cursor = { ts: Number(row.time_updated) - 1, id: "zzzzzz" }
 
     const result = await runExport({ fromCursor: cursor, budgetMs: 10000 })
     expect(result.updates).toBeGreaterThan(0)
@@ -684,11 +691,14 @@ describe.skipIf(!LIVE)("L2 reindex (export update propagation)", () => {
   }, 30000)
   test("RX-U updated parts (time_updated > time_created) get picked up by delta sync", () => {
     // Reality check: SQL ground truth says >50% of parts have time_updated > time_created.
-    // Our v2 cursor catches them all on first sync. We've verified this above by getting
-    // 78k+ "updates" counted in a single run, which would have been 0 under the v1 cursor.
-    const cursor = getLastSync()
-    expect(cursor).not.toBeNull()
-    expect(cursor!.ts).toBeGreaterThan(1_770_000_000_000) // recent epoch
+    // v3 tracks part inserts by id and updated sessions by (time_updated,id), so
+    // updated parts propagate through the session-dirty cursor instead of a global
+    // part time_updated cursor.
+    const state = getSyncState()
+    expect(state.schema).toBe("v3")
+    expect(state.session_cursor).not.toBeNull()
+    expect(state.session_cursor!.ts).toBeGreaterThan(1_770_000_000_000) // recent epoch
+    expect(typeof state.session_cursor!.id).toBe("string")
   })
 })
 

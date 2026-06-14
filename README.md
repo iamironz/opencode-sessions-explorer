@@ -126,7 +126,8 @@ full first-run walkthrough, see [docs/install.md](docs/install.md) and
 
 - **One-time export.** `bulk-export` materializes searchable session content for `ck`.
 - **Stay current.** The plugin auto-syncs new parts before each search call; rebuild
-  the optional semantic index when you want embeddings.
+  the optional semantic index explicitly (`ck --reindex .` / `ck --index .`) when
+  `sem` or `hybrid` warnings report stale or partial coverage.
 - **Health probe.** `check-deps` and the `db-stats` tool report dependency and schema
   health.
 - See [docs/guides/export-and-maintenance.md](docs/guides/export-and-maintenance.md).

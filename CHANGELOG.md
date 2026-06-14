@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-06-14
+
+### Fixed
+- `search-text` now reports honest `ck` semantic index freshness for `sem`/`hybrid`
+  modes (missing/stale/partial) and directs users to explicit `ck --index` /
+  `ck --reindex` workflows instead of implying inline rebuilds.
+- `search-text` and `grep-session` now expose partial multi-scope `ck` coverage when
+  timeout truncation leaves some session/channel scopes unsearched.
+
 ## [0.1.2] - 2026-06-13
 
 ### Changed

@@ -14,7 +14,7 @@
  */
 import { spawn } from "node:child_process"
 import type { ChildProcessWithoutNullStreams } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, statSync } from "node:fs"
 import { exportRoot } from "./export.js"
 import { SessionsError } from "./errors.js"
 
@@ -49,6 +49,29 @@ export type CkRunResult = {
   stderr: string
   durationMs: number
   timedOut: boolean
+  scopeCoverage: CkScopeCoverage
+}
+
+export type CkScopeCoverage = {
+  strategy: "single" | "fanout"
+  searched_scopes: number
+  total_scopes: number
+  omitted_scopes: number
+  truncated: boolean
+  timed_out: boolean
+}
+
+export type CkIndexStatus = "fresh" | "stale" | "missing" | "partial"
+
+export type CkIndexFreshness = {
+  status: CkIndexStatus
+  present: boolean
+  embedded_chunks: number | null
+  index_updated_ms: number | null
+  export_marker_ms: number | null
+  status_json_available: boolean
+  source: "status-json" | "manifest" | "missing"
+  warning: string | null
 }
 
 /**
@@ -60,7 +83,6 @@ export type CkRunResult = {
 function defaultCkCandidates(): string[] {
   const home = process.env.HOME ?? ""
   const candidates = [
-    process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN,
     // Common cross-platform install locations
     home ? `${home}/.cargo/bin/ck` : null,
     "/usr/local/bin/ck",
@@ -71,6 +93,7 @@ function defaultCkCandidates(): string[] {
 }
 
 export function locateCk(): string {
+  if (process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN) return process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN
   for (const c of defaultCkCandidates()) {
     if (c.startsWith("/") && existsSync(c)) return c
   }
@@ -118,6 +141,7 @@ export async function runCk(opts: CkOptions): Promise<CkRunResult> {
 
   proc.stdout.setEncoding("utf8")
   proc.stderr.setEncoding("utf8")
+  let procError: unknown = null
 
   proc.stdout.on("data", (chunk: string) => {
     buf += chunk
@@ -135,20 +159,42 @@ export async function runCk(opts: CkOptions): Promise<CkRunResult> {
   proc.stderr.on("data", (chunk: string) => { stderr += chunk })
 
   const rc = await new Promise<number>((resolve) => {
-    proc.on("error", (e: any) => {
-      if (e?.name === "AbortError" || ctl.signal.aborted) { timedOut = true; resolve(124) }
+    proc.on("error", (e: Error & { code?: string }) => {
+      procError = e
+      if (e.name === "AbortError" || ctl.signal.aborted) { timedOut = true; resolve(124) }
       else resolve(2)
     })
     proc.on("close", (code) => resolve(code ?? 0))
   })
   if (timer) clearTimeout(timer)
 
+  const childError = procError as (Error & { code?: string }) | null
+  if (childError && !timedOut) {
+    if (childError.code === "ENOENT") throw new SessionsError("CK_NOT_FOUND", `ck CLI not found at '${locateCk()}'; install via 'cargo install ck-search'`)
+    throw new SessionsError("CK_FAILED", `ck process failed: ${childError.message}`)
+  }
+
   // Flush trailing buf
   if (buf.trim()) {
     try { const obj = JSON.parse(buf.trim()); if (obj?.path) hits.push(obj as CkHit) } catch {}
   }
 
-  return { hits, rc, stderr, durationMs: Date.now() - start, timedOut }
+  const totalScopes = opts.scopes.length === 0 ? 1 : opts.scopes.length
+  return {
+    hits,
+    rc,
+    stderr,
+    durationMs: Date.now() - start,
+    timedOut,
+    scopeCoverage: {
+      strategy: "single",
+      searched_scopes: totalScopes,
+      total_scopes: totalScopes,
+      omitted_scopes: 0,
+      truncated: false,
+      timed_out: timedOut,
+    },
+  }
 }
 
 async function runCkMultiScope(opts: CkOptions): Promise<CkRunResult> {
@@ -157,6 +203,7 @@ async function runCkMultiScope(opts: CkOptions): Promise<CkRunResult> {
   let stderr = ""
   let rc = 1
   let timedOut = false
+  let searchedScopes = 0
   const topk = opts.topk ?? 50
   const perScopeTopk = Math.max(5, Math.ceil(topk / Math.max(1, opts.scopes.length)))
 
@@ -165,12 +212,17 @@ async function runCkMultiScope(opts: CkOptions): Promise<CkRunResult> {
     const remaining = opts.timeoutMs == null ? undefined : Math.max(1, opts.timeoutMs - elapsed)
     if (remaining != null && remaining <= 1) { timedOut = true; break }
     const res = await runCk({ ...opts, scopes: [scope], timeoutMs: remaining, topk: perScopeTopk })
+    searchedScopes++
     hits.push(...res.hits)
     if (res.stderr) stderr += (stderr && !stderr.endsWith("\n") ? "\n" : "") + res.stderr
     if (res.timedOut) timedOut = true
     if (res.rc === 0) rc = 0
     else if (rc !== 0 && res.rc !== 1) rc = res.rc
+    if (timedOut && opts.timeoutMs != null && Date.now() - start >= opts.timeoutMs) break
   }
+
+  const truncated = searchedScopes < opts.scopes.length
+  if (truncated && timedOut && rc === 1) rc = 124
 
   return {
     hits: hits.sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, topk),
@@ -178,6 +230,14 @@ async function runCkMultiScope(opts: CkOptions): Promise<CkRunResult> {
     stderr,
     durationMs: Date.now() - start,
     timedOut,
+    scopeCoverage: {
+      strategy: "fanout",
+      searched_scopes: searchedScopes,
+      total_scopes: opts.scopes.length,
+      omitted_scopes: Math.max(0, opts.scopes.length - searchedScopes),
+      truncated,
+      timed_out: timedOut,
+    },
   }
 }
 
@@ -190,5 +250,201 @@ export function ckIndexPresent(root = exportRoot()): { present: boolean; embedde
     return { present: true, embedded_chunks: m?.totals?.embedded_chunks ?? null }
   } catch {
     return { present: true, embedded_chunks: null }
+  }
+}
+
+/**
+ * Best-effort semantic index freshness probe. This never builds/rebuilds ck; it
+ * only asks `ck --status-json` when supported and falls back to manifest markers.
+ */
+export async function ckIndexFreshness(root = exportRoot(), timeoutMs = 1500): Promise<CkIndexFreshness> {
+  const manifestPath = `${root}/.ck/manifest.json`
+  const markerMs = exportMarkerMtime(root)
+  const manifest = readManifestProbe(manifestPath)
+  if (!manifest.present) {
+    return {
+      status: "missing",
+      present: false,
+      embedded_chunks: null,
+      index_updated_ms: null,
+      export_marker_ms: markerMs,
+      status_json_available: false,
+      source: "missing",
+      warning: ckIndexWarning("missing", root),
+    }
+  }
+
+  const statusJson = await readStatusJson(root, timeoutMs)
+  const statusProbe = statusJson.ok ? probeFromUnknown(statusJson.value) : null
+  const embedded = statusProbe?.embedded_chunks ?? manifest.embedded_chunks
+  const indexUpdated = statusProbe?.index_updated_ms ?? manifest.index_updated_ms
+  let status = statusFromProbe(statusProbe?.status, embedded, indexUpdated, markerMs)
+  const source: CkIndexFreshness["source"] = statusProbe ? "status-json" : "manifest"
+
+  // If ck cannot attest its own status, avoid claiming a semantic index is fresh.
+  if (!statusJson.ok && status === "fresh") status = "partial"
+
+  const warning = status === "fresh"
+    ? null
+    : ckIndexWarning(status, root, statusJson.ok ? null : statusJson.reason)
+
+  return {
+    status,
+    present: true,
+    embedded_chunks: embedded,
+    index_updated_ms: indexUpdated,
+    export_marker_ms: markerMs,
+    status_json_available: statusJson.ok,
+    source,
+    warning,
+  }
+}
+
+function statusFromProbe(
+  explicit: CkIndexStatus | null | undefined,
+  embeddedChunks: number | null,
+  indexUpdatedMs: number | null,
+  exportMarkerMs: number | null,
+): CkIndexStatus {
+  if (explicit === "missing" || explicit === "stale" || explicit === "partial") return explicit
+  if (embeddedChunks != null && embeddedChunks <= 0) return "partial"
+  if (indexUpdatedMs == null) return "partial"
+  if (exportMarkerMs != null && indexUpdatedMs + 1000 < exportMarkerMs) return "stale"
+  return "fresh"
+}
+
+function ckIndexWarning(status: CkIndexStatus, root: string, probeFailure?: string | null): string {
+  const rebuild = `Run 'cd "${root}" && ck --reindex .' (or 'ck --index .') externally; opencode-sessions-explorer will not rebuild embeddings inline.`
+  if (status === "missing") return `ck semantic index is missing at ${root}/.ck. ${rebuild}`
+  if (status === "stale") return `ck semantic index appears stale relative to the export tree; sem/hybrid results may omit recently exported files. ${rebuild}`
+  const reason = probeFailure ? ` (${probeFailure})` : ""
+  return `ck semantic index freshness is partial/unverified${reason}; sem/hybrid results may cover only indexed files. ${rebuild}`
+}
+
+function exportMarkerMtime(root: string): number | null {
+  const markers = [".last_sync", ".channels_v1_complete"]
+  let newest: number | null = null
+  for (const marker of markers) {
+    const path = `${root}/${marker}`
+    if (!existsSync(path)) continue
+    try {
+      const mtime = statSync(path).mtimeMs
+      newest = newest == null ? mtime : Math.max(newest, mtime)
+    } catch { /* ignore marker races */ }
+  }
+  return newest
+}
+
+type IndexProbe = {
+  present: boolean
+  embedded_chunks: number | null
+  index_updated_ms: number | null
+  status?: CkIndexStatus | null
+}
+
+function readManifestProbe(manifestPath: string): IndexProbe {
+  if (!existsSync(manifestPath)) return { present: false, embedded_chunks: null, index_updated_ms: null }
+  try {
+    return { present: true, ...probeFromUnknown(JSON.parse(readFileSync(manifestPath, "utf8"))) }
+  } catch {
+    return { present: true, embedded_chunks: null, index_updated_ms: null, status: "partial" }
+  }
+}
+
+function probeFromUnknown(value: unknown): Omit<IndexProbe, "present"> {
+  return {
+    embedded_chunks: firstNumber(value, [["totals", "embedded_chunks"], ["embedded_chunks"], ["index", "embedded_chunks"]]),
+    index_updated_ms: firstTimeMs(value, [["index_updated"], ["index_updated_ms"], ["indexed_at"], ["updated_at"], ["last_indexed"], ["manifest", "index_updated"]]),
+    status: firstStatus(value),
+  }
+}
+
+function firstStatus(value: unknown): CkIndexStatus | null {
+  const raw = firstString(value, [["status"], ["index_status"], ["semantic_status"], ["index", "status"]])?.toLowerCase()
+  if (raw === "fresh" || raw === "stale" || raw === "missing" || raw === "partial") return raw
+  return null
+}
+
+function firstNumber(value: unknown, paths: string[][]): number | null {
+  for (const path of paths) {
+    const n = numberFromUnknown(valueAtPath(value, path))
+    if (n != null) return n
+  }
+  return null
+}
+
+function firstTimeMs(value: unknown, paths: string[][]): number | null {
+  for (const path of paths) {
+    const ms = timeMsFromUnknown(valueAtPath(value, path))
+    if (ms != null) return ms
+  }
+  return null
+}
+
+function firstString(value: unknown, paths: string[][]): string | null {
+  for (const path of paths) {
+    const v = valueAtPath(value, path)
+    if (typeof v === "string" && v.trim()) return v.trim()
+  }
+  return null
+}
+
+function valueAtPath(value: unknown, path: string[]): unknown {
+  let cur = value
+  for (const key of path) {
+    if (!cur || typeof cur !== "object") return undefined
+    cur = (cur as Record<string, unknown>)[key]
+  }
+  return cur
+}
+
+function numberFromUnknown(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value
+  if (typeof value === "string" && value.trim()) {
+    const n = Number(value)
+    if (Number.isFinite(n)) return n
+  }
+  return null
+}
+
+function timeMsFromUnknown(value: unknown): number | null {
+  const numeric = numberFromUnknown(value)
+  if (numeric != null) return numeric < 10_000_000_000 ? numeric * 1000 : numeric
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Date.parse(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return null
+}
+
+async function readStatusJson(root: string, timeoutMs: number): Promise<{ ok: true; value: unknown } | { ok: false; reason: string }> {
+  const ctl = new AbortController()
+  const timer = setTimeout(() => ctl.abort(), timeoutMs)
+  let proc: ChildProcessWithoutNullStreams
+  try {
+    proc = spawn(locateCk(), ["--status-json"], { cwd: root, signal: ctl.signal })
+  } catch (e) {
+    clearTimeout(timer)
+    return { ok: false, reason: `ck --status-json spawn failed: ${(e as Error).message}` }
+  }
+
+  let stdout = ""
+  let stderr = ""
+  proc.stdout.setEncoding("utf8")
+  proc.stderr.setEncoding("utf8")
+  proc.stdout.on("data", (chunk: string) => { stdout += chunk })
+  proc.stderr.on("data", (chunk: string) => { stderr += chunk })
+
+  const rc = await new Promise<number>((resolve) => {
+    proc.on("error", (e: Error) => resolve(e.name === "AbortError" || ctl.signal.aborted ? 124 : 2))
+    proc.on("close", (code) => resolve(code ?? 0))
+  })
+  clearTimeout(timer)
+
+  if (rc !== 0) return { ok: false, reason: `ck --status-json unavailable (rc=${rc}${stderr ? `: ${stderr.trim().slice(0, 120)}` : ""})` }
+  try {
+    return { ok: true, value: JSON.parse(stdout.trim()) }
+  } catch {
+    return { ok: false, reason: "ck --status-json returned non-JSON output" }
   }
 }

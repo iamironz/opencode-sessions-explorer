@@ -7,7 +7,7 @@
 import { tool } from "@opencode-ai/plugin"
 import { stmt } from "../lib/db.js"
 import { runWithEnvelope, fail } from "../lib/envelope.js"
-import { runCk } from "../lib/ck.js"
+import { runCk, type CkScopeCoverage } from "../lib/ck.js"
 import { channelExportComplete, runExport, exportRoot } from "../lib/export.js"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
@@ -45,7 +45,12 @@ export const grepSession = tool({
       // Delta-sync (cheap if up to date)
       try {
         const syncRes = await runExport({ budgetMs: 3000 })
-        ctx.indexStatus = syncRes.exported > 0 ? "fresh" : "fresh"
+        if (syncRes.lock_skipped) {
+          ctx.warnings.push("delta sync skipped: export lock is held by another process; results may use stale/partial export data.")
+          ctx.indexStatus = "stale"
+        } else {
+          ctx.indexStatus = "fresh"
+        }
       } catch (e) {
         ctx.warnings.push(`delta sync skipped: ${(e as Error).message}`)
         ctx.indexStatus = "stale"
@@ -68,6 +73,7 @@ export const grepSession = tool({
         timeoutMs: 10000,
       })
       if (ck.timedOut) ctx.warnings.push("ck timed out at 10 s")
+      warnOnPartialScopeCoverage(ctx, ck.scopeCoverage)
       if (ck.rc !== 0 && ck.rc !== 1) ctx.warnings.push(`ck rc=${ck.rc} stderr=${truncateString(ck.stderr, 256).value}`)
 
       const matches = ck.hits.slice(0, args.limit).map((h) => enrichHit(h, args.redact))
@@ -82,10 +88,19 @@ export const grepSession = tool({
         scanned_files: matches.length, // ck doesn't report total scanned in jsonl; approximate
         matches: table(matches, { dict: ["channel"] }),
         ck_duration_ms: ck.durationMs,
+        ck_scope_coverage: ck.scopeCoverage,
       }
     })
   },
 })
+
+function warnOnPartialScopeCoverage(ctx: any, coverage: CkScopeCoverage): void {
+  if (!coverage.truncated) return
+  ctx.warnings.push(
+    `ck searched ${coverage.searched_scopes}/${coverage.total_scopes} scopes before stopping; results are partial and ${coverage.omitted_scopes} scopes were not searched. ` +
+    "Narrow channels/surface or retry with a smaller session export.",
+  )
+}
 
 function enrichHit(h: any, redact: boolean) {
   // ck path format: ".../by-session/<ses_id>/<NNNN>-<prt_id>.txt"

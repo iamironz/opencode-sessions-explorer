@@ -20,7 +20,7 @@
 import { tool } from "@opencode-ai/plugin"
 import { stmt } from "../lib/db.js"
 import { runWithEnvelope } from "../lib/envelope.js"
-import { runCk, ckIndexPresent } from "../lib/ck.js"
+import { runCk, ckIndexFreshness, type CkIndexStatus, type CkScopeCoverage } from "../lib/ck.js"
 import { channelExportComplete, runExport, exportRoot } from "../lib/export.js"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
@@ -71,36 +71,47 @@ export const searchText = tool({
       // Pre-filter scope: resolve to a list of session_ids in DB.
       const scopeIds = resolveScope(args)
       const root = exportRoot()
-      let scopes = resolveCkScopes(root, scopeIds, channels, ctx)
-      if (scopeIds !== "all") {
-        if (scopes.length === 0) {
-          return groupBySession
-            ? { sessions: table([]), hits_total: 0, mode: args.mode, surface, channels, scope_session_count: 0, ck_duration_ms: 0, suppressed: emptySuppressed(channels) }
-            : { hits: table([]), mode: args.mode, scope_session_count: 0, ck_duration_ms: 0 }
-        }
-      } else if (surface === "forensics" || channels.includes("raw")) {
+      if (scopeIds !== "all" && scopeIds.length === 0) {
+        return groupBySession
+          ? { sessions: table([]), hits_total: 0, mode: args.mode, surface, channels, scope_session_count: 0, ck_duration_ms: 0, suppressed: emptySuppressed(channels) }
+          : { hits: table([]), mode: args.mode, scope_session_count: 0, ck_duration_ms: 0 }
+      }
+
+      if (scopeIds === "all" && (surface === "forensics" || channels.includes("raw"))) {
         ctx.warnings.push("raw unscoped forensic search can take 10-30s. Add session_ids/project_id/agent/since_ms to narrow.")
       }
 
       // Delta-sync (best-effort)
+      let exportStatus: "fresh" | "stale" = "fresh"
       try {
-        await runExport({ budgetMs: 4000 })
-        ctx.indexStatus = "fresh"
+        exportStatus = applyExportProgress(ctx, await runExport({ budgetMs: 4000 }))
       } catch (e) {
         ctx.warnings.push(`delta sync skipped: ${(e as Error).message}`)
         ctx.indexStatus = "stale"
+        exportStatus = "stale"
+      }
+
+      const scopes = resolveCkScopes(root, scopeIds, channels, ctx)
+      if (scopeIds !== "all" && scopes.length === 0) {
+        ctx.warnings.push(`export scope missing after delta sync for ${scopeIds.length} DB session(s); returning empty results from stale/partial export data.`)
+        return groupBySession
+          ? { sessions: table([]), hits_total: 0, mode: args.mode, surface, channels, scope_session_count: scopeIds.length, ck_duration_ms: 0, suppressed: emptySuppressed(channels) }
+          : { hits: table([]), mode: args.mode, scope_session_count: scopeIds.length, ck_duration_ms: 0 }
       }
 
       // For sem/hybrid, check index presence
       let effectiveMode = args.mode
       if (args.mode === "sem" || args.mode === "hybrid") {
-        const ck = ckIndexPresent(root)
-        if (!ck.present) {
-          ctx.warnings.push(`ck semantic index not present at ${root}/.ck — falling back to regex. Run 'ck --index .' inside the export root to enable semantic search.`)
+        const freshness = await ckIndexFreshness(root)
+        ctx.indexStatus = combineExportAndCkStatus(exportStatus, freshness.status)
+        if (freshness.warning) ctx.warnings.push(freshness.warning)
+        if (freshness.status === "missing") {
+          ctx.warnings.push("ck semantic index missing; falling back to regex for this request.")
           effectiveMode = "regex"
           ctx.mode = "fallback-regex"
-        } else if (ck.embedded_chunks != null) {
-          ctx.warnings.push(`ck index present (${ck.embedded_chunks} embedded chunks). Semantic results limited to indexed files only.`)
+        } else if (freshness.status !== "fresh") {
+          const chunks = freshness.embedded_chunks != null ? ` (${freshness.embedded_chunks} embedded chunks)` : ""
+          ctx.warnings.push(`ck semantic index status is ${freshness.status}${chunks}; sem/hybrid results are partial until an explicit ck rebuild is run.`)
         }
       }
       if (!ctx.mode) ctx.mode = effectiveMode
@@ -139,6 +150,16 @@ function resolveScope(args: any): "all" | string[] {
 
 function normalizeChannels(channels: SearchChannel[]): SearchChannel[] {
   return Array.from(new Set(channels.length ? channels : ["conversation", "session-summary"]))
+}
+
+function applyExportProgress(ctx: any, progress: { lock_skipped: boolean }): "fresh" | "stale" {
+  if (progress.lock_skipped) {
+    ctx.warnings.push("delta sync skipped: export lock is held by another process; results may use stale/partial export data.")
+    ctx.indexStatus = "stale"
+    return "stale"
+  }
+  ctx.indexStatus = "fresh"
+  return "fresh"
 }
 
 function resolveCkScopes(root: string, scopeIds: "all" | string[], channels: SearchChannel[], ctx: any): string[] {
@@ -185,6 +206,7 @@ async function runWithCk(args: any, scopes: string[], mode: "regex" | "lex" | "s
     timeoutMs: args.timeout_ms,
   })
   if (ck.timedOut) ctx.warnings.push(`ck timed out at ${args.timeout_ms}ms`)
+  warnOnPartialScopeCoverage(ctx, ck.scopeCoverage, args.timeout_ms)
   if (ck.rc !== 0 && ck.rc !== 1) ctx.warnings.push(`ck rc=${ck.rc} stderr=${truncateString(ck.stderr, 256).value}`)
 
   // Parse session_id + part_id per hit
@@ -345,6 +367,7 @@ async function runWithCk(args: any, scopes: string[], mode: "regex" | "lex" | "s
       scope_session_count: sessionCount,
       ck_duration_ms: ck.durationMs,
       ck_timed_out: ck.timedOut,
+      ck_scope_coverage: ck.scopeCoverage,
       role_filter: args.role,
       suppressed: { ...emptySuppressed(channels), duplicate_hits: duplicateCount },
     }
@@ -374,9 +397,24 @@ async function runWithCk(args: any, scopes: string[], mode: "regex" | "lex" | "s
     scope_session_count: sessionCount,
     ck_duration_ms: ck.durationMs,
     ck_timed_out: ck.timedOut,
+    ck_scope_coverage: ck.scopeCoverage,
     role_filter: args.role,
     suppressed: { ...emptySuppressed(channels), duplicate_hits: duplicateCount },
   }
+}
+
+function combineExportAndCkStatus(exportStatus: "fresh" | "stale", ckStatus: CkIndexStatus): CkIndexStatus {
+  if (ckStatus === "missing" || ckStatus === "partial") return ckStatus
+  if (exportStatus === "stale") return "stale"
+  return ckStatus
+}
+
+function warnOnPartialScopeCoverage(ctx: any, coverage: CkScopeCoverage, timeoutMs: number): void {
+  if (!coverage.truncated) return
+  ctx.warnings.push(
+    `ck searched ${coverage.searched_scopes}/${coverage.total_scopes} scopes before stopping; results are partial and ${coverage.omitted_scopes} scopes were not searched. ` +
+    `Narrow session_ids/project_id/since_ms or raise timeout_ms (current ${timeoutMs}ms).`,
+  )
 }
 
 function parsePath(p: string): { sessionId: string | null; partId: string | null; channel: SearchChannel } {

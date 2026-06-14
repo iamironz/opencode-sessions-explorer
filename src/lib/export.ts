@@ -7,7 +7,7 @@
  *     <NNNN>-<prt_id>.txt   (one per searchable part)
  *   <root>/by-channel/<channel>/by-session/<ses_id>/
  *     <NNNN>-<prt_id>.txt   (derived curated search views)
- *   <root>/.last_sync       (cursor: `${ts}:${id}`)
+ *   <root>/.last_sync       (v3 JSON sync state)
  *
  * `ck` is point-and-shoot — it walks the tree, indexes text files,
  * ignores the meta.json (per its default .ckignore which excludes JSON).
@@ -17,24 +17,58 @@
  *
  * Atomic writes: temp file + rename. Dotfile-prefix marks in-flight.
  */
-import { db, stmt, locateDb } from "./db.js"
+import { stmt } from "./db.js"
 import { decodePart, decodeModel, type DecodedPart } from "./decode.js"
-import { mkdirSync, existsSync, renameSync, readFileSync, writeFileSync, unlinkSync, readdirSync, statSync } from "node:fs"
-import { join, dirname } from "node:path"
+import { mkdirSync, existsSync, renameSync, writeFileSync, unlinkSync, readdirSync } from "node:fs"
+import { join } from "node:path"
 import { homedir } from "node:os"
 import type { SearchChannel } from "./channel.js"
 import { CHANNELS, compactPath, normalizeError } from "./channel.js"
+import { SEARCHABLE_TYPES } from "./export-constants.js"
+import { acquireExportLock } from "./export-lock.js"
+import { reconcileTombstones, type TombstoneProgress } from "./export-tombstones.js"
+import { scheduleBackgroundReconcile } from "./export-background.js"
+import {
+  getLastSync as readLastSync,
+  getSyncState as readSyncState,
+  setLastSync as writeLastSync,
+  setSyncState as writeSyncState,
+  type DirtySessionHint,
+  type ExportCursor,
+  type FailedPartState,
+  type SyncState,
+} from "./export-state.js"
+
+export { SEARCHABLE_TYPES } from "./export-constants.js"
+export type { ExportCursor, SyncState } from "./export-state.js"
 
 export const DEFAULT_EXPORT_ROOT = join(homedir(), ".local/share/opencode-sessions-explorer")
 const BODY_CAP_BYTES = 256 * 1024
 const SAFETY_PART_CAP_BYTES = 50 * 1024 * 1024 // skip parts larger than 50 MB raw
 const CHANNEL_COMPLETE_MARKER = ".channels_v1_complete"
-
-export const SEARCHABLE_TYPES = ["text", "reasoning", "tool", "file", "patch", "subtask"] as const
+const INSERT_REWIND_MS = 3 * 60 * 1000
+const INSERT_REWIND_MAX_ROWS = 512
+const MAX_FAILED_ATTEMPTS = 5
 const PART_CHANNELS: SearchChannel[] = CHANNELS.filter((c) => c !== "session-summary" && c !== "raw")
 
 export function exportRoot(): string {
   return process.env.OPENCODE_SESSIONS_EXPLORER_EXPORT_ROOT || DEFAULT_EXPORT_ROOT
+}
+
+export function getSyncState(root = exportRoot()): SyncState {
+  return readSyncState(root)
+}
+
+export function setSyncState(state: SyncState, root = exportRoot()): void {
+  writeSyncState(state, root)
+}
+
+export function getLastSync(root = exportRoot()): ExportCursor | null {
+  return readLastSync(root)
+}
+
+export function setLastSync(cursor: ExportCursor, root = exportRoot()): void {
+  writeLastSync(cursor, root)
 }
 
 export function ensureRoot(root = exportRoot()): string {
@@ -50,43 +84,6 @@ export function markChannelExportComplete(root = exportRoot()): void {
   const p = join(root, CHANNEL_COMPLETE_MARKER)
   const tmp = p + ".tmp"
   writeFileSync(tmp, String(Date.now()))
-  renameSync(tmp, p)
-}
-
-export type ExportCursor = { ts: number; id: string }
-
-/**
- * Cursor schema versions:
- *   v1 — `${ts}:${id}` where ts = time_created (pre-2026-05-25T15h)
- *   v2 — `v2 ${ts}:${id}` where ts = time_updated (current)
- *
- * Reading a v1 cursor returns null so the next sync starts from 0 and re-exports
- * the whole corpus once. The exporter is idempotent: existing files are simply
- * overwritten by the byPartId map.
- */
-const CURSOR_SCHEMA = "v2"
-
-export function getLastSync(root = exportRoot()): ExportCursor | null {
-  const p = join(root, ".last_sync")
-  if (!existsSync(p)) return null
-  try {
-    const raw = readFileSync(p, "utf8").trim()
-    if (!raw) return null
-    if (raw.startsWith(`${CURSOR_SCHEMA} `)) {
-      const [tsStr, id] = raw.slice(CURSOR_SCHEMA.length + 1).split(":")
-      const ts = Number(tsStr)
-      if (!Number.isFinite(ts) || !id) return null
-      return { ts, id }
-    }
-    // v1 cursor (time_created) — discard so the next sync re-exports from zero
-    return null
-  } catch { return null }
-}
-
-export function setLastSync(c: ExportCursor, root = exportRoot()): void {
-  const p = join(root, ".last_sync")
-  const tmp = p + ".tmp"
-  writeFileSync(tmp, `${CURSOR_SCHEMA} ${c.ts}:${c.id}`)
   renameSync(tmp, p)
 }
 
@@ -424,11 +421,7 @@ function firstUserPrompt(sessionId: string, direction: "ASC" | "DESC"): string |
   return capBody(joined, "summary")
 }
 
-/**
- * Iterate parts in (time_created, id) order from after `cursor`, in
- * batches of `batch_size`. Yields per-part results so the caller can
- * decide what to do.
- */
+/** Export progress for both inline fast sync and full reconcile. */
 export type ExportProgress = {
   exported: number              // total parts written (inserts + updates)
   inserts: number               // new part files
@@ -436,6 +429,11 @@ export type ExportProgress = {
   skipped_nontext: number       // step-start / step-finish / compaction
   skipped_oversize: number      // > 50 MB safety cap
   failed: number                // decode / write errors
+  retried: number                // failed part ids retried from v3 state
+  dead_lettered: number          // failed ids moved out of the hot retry set
+  tombstones_removed_parts: number
+  tombstones_removed_sessions: number
+  lock_skipped: boolean
   last_cursor: ExportCursor | null
 }
 
@@ -471,10 +469,22 @@ function getFileIndex(sessionId: string, dir: string): SessionFileIndex {
   return idx
 }
 
+type PartExportRow = {
+  id: string
+  session_id: string
+  message_id: string
+  time_created: number
+  time_updated: number
+  data: string
+  data_bytes: number
+  role: string | null
+}
+
+type DirtySessionRow = { id: string; time_updated: number }
+
 /**
- * Run export in batches starting from `from` cursor (or last_sync if not given).
- * If `budgetMs` is set, stops once that many ms have elapsed (for delta sync
- * inside search calls). On bulk export, leave budgetMs undefined.
+ * Run export sync. Budgeted calls use id-keyset insert detection plus small
+ * session-dirty scans; unbudgeted calls also reconcile tombstones.
  */
 export async function runExport(opts: {
   root?: string
@@ -482,106 +492,366 @@ export async function runExport(opts: {
   budgetMs?: number
   batchSize?: number
   onProgress?: (p: ExportProgress) => void
+  skipBackgroundReconcile?: boolean
 } = {}): Promise<ExportProgress> {
   const root = ensureRoot(opts.root ?? exportRoot())
-  const cursor = opts.fromCursor !== undefined ? opts.fromCursor : getLastSync(root)
   const batchSize = opts.batchSize ?? 1000
-  const start = Date.now()
-  const progress: ExportProgress = { exported: 0, inserts: 0, updates: 0, skipped_nontext: 0, skipped_oversize: 0, failed: 0, last_cursor: cursor }
-
-  // Cursor is on (time_updated, id) — catches BOTH new parts AND parts whose
-  // status mutated since the last sync (tool pending → completed, etc.).
-  let where = ""
-  const params: any[] = []
-  if (cursor) {
-    where = "WHERE (p.time_updated > ? OR (p.time_updated = ? AND p.id > ?))"
-    params.push(cursor.ts, cursor.ts, cursor.id)
+  const progress = emptyProgress(getLastSync(root))
+  const lock = acquireExportLock(root)
+  if (!lock) {
+    progress.lock_skipped = true
+    return progress
   }
 
-  let updates = 0
-  let inserts = 0
-  const touchedSessions = new Set<string>()
+  try {
+    const state = getSyncState(root)
+    applyCursorOverride(state, opts.fromCursor)
+    const start = Date.now()
+    const touchedSessions = new Set<string>()
 
-  // Stream
-  while (true) {
-    if (opts.budgetMs && Date.now() - start > opts.budgetMs) break
-    const rows = stmt(`
-      SELECT p.id, p.session_id, p.message_id, p.time_created, p.time_updated, p.data, LENGTH(p.data) AS data_bytes,
-             json_extract(m.data,'$.role') AS role
-        FROM part p
-        LEFT JOIN message m ON m.id = p.message_id
-        ${where}
-    ORDER BY p.time_updated ASC, p.id ASC
-       LIMIT ?`).all(...params, batchSize) as any[]
-    if (rows.length === 0) break
-    for (const r of rows) {
-      if (opts.budgetMs && Date.now() - start > opts.budgetMs) break
-      if (r.data_bytes > SAFETY_PART_CAP_BYTES) {
-        progress.skipped_oversize++
-      } else {
-        try {
-          const s = getSession(r.session_id)
-          if (!s) { progress.failed++; continue }
-          const built = buildPartFile(r.id, r.session_id, r.message_id, r.data, s.time_archived != null)
-          if (!built) { progress.skipped_nontext++; continue }
-          const channelDocs = buildChannelDocuments(r.id, r.session_id, r.message_id, r.data, s.time_archived != null, r.role ?? null, s.directory)
-          const dir = join(root, "by-session", r.session_id)
-          if (!existsSync(dir)) { mkdirSync(dir, { recursive: true }); writeMeta(s, dir) }
-          const idx = getFileIndex(r.session_id, dir)
-          const existing = idx.byPartId.get(r.id)
-          if (existing) {
-            // Re-export: overwrite the same file (preserves seq order)
-            writePartFile(dir, existing, built.content)
-            updates++
-          } else {
-            // New part: allocate a fresh seq and write
-            const seq = idx.nextSeq++
-            const filename = safePartFilename(seq, r.id)
-            writePartFile(dir, filename, built.content)
-            idx.byPartId.set(r.id, filename)
-            inserts++
-          }
-          const filename = idx.byPartId.get(r.id)
-          if (filename) writeChannelFiles(root, r.session_id, filename, r.id, channelDocs)
-          touchedSessions.add(r.session_id)
-          progress.exported++
-        } catch {
-          progress.failed++
-        }
+    retryFailedParts(root, state, progress, touchedSessions, start, opts.budgetMs, batchSize, opts.onProgress, lock.heartbeat)
+    runInsertFastPath(root, state, progress, touchedSessions, start, opts.budgetMs, batchSize, opts.onProgress, lock.heartbeat)
+    runSessionDirtyFastPath(root, state, progress, touchedSessions, start, opts.budgetMs, batchSize, opts.onProgress, lock.heartbeat)
+    refreshTouchedSessions(root, touchedSessions)
+
+    if (!opts.budgetMs) {
+      lock.heartbeat()
+      const tombstones = reconcileTombstones(root, lock.heartbeat)
+      applyTombstoneProgress(progress, tombstones)
+      state.last_reconcile_at = Date.now()
+      state.reconcile_watermark = {
+        part_id: state.insert_cursor.id || null,
+        session_id: state.session_cursor?.id ?? null,
+        at: state.last_reconcile_at,
       }
-      progress.last_cursor = { ts: r.time_updated, id: r.id }
     }
-    // Advance cursor for next iteration
-    const last = rows[rows.length - 1]
-    where = "WHERE (p.time_updated > ? OR (p.time_updated = ? AND p.id > ?))"
-    params.length = 0
-    params.push(last.time_updated, last.time_updated, last.id)
-    if (opts.onProgress && progress.exported % 5000 === 0) opts.onProgress(progress)
-    // Periodic flush of last_sync
-    if (progress.last_cursor && progress.exported > 0 && progress.exported % 5000 === 0) {
-      setLastSync(progress.last_cursor, root)
-    }
+
+    progress.last_cursor = state.legacy_cursor
+    setSyncState(state, root)
+  } finally {
+    lock.release()
   }
 
-  // Refresh meta.json for each touched session (cheap; one write per session)
-  for (const sid of touchedSessions) {
-    const s = getSession(sid)
-    if (s) {
-      const dir = join(root, "by-session", sid)
-      // session info changes over time (cost, time_updated) — re-fetch fresh
-      const fresh = stmt(`
-        SELECT id, title, project_id, directory, agent, model, cost,
-               time_created, time_updated, time_archived, parent_id
-          FROM session WHERE id = ?`).get(sid) as any
-      if (fresh) writeMeta(fresh, dir)
-      if (fresh) writeSessionSummaryChannel(fresh, root)
-    }
+  if (opts.budgetMs && !opts.skipBackgroundReconcile) {
+    scheduleBackgroundReconcile({ root })
   }
-
-  if (progress.last_cursor) setLastSync(progress.last_cursor, root)
-  progress.updates = updates
-  progress.inserts = inserts
   return progress
+}
+
+function emptyProgress(cursor: ExportCursor | null): ExportProgress {
+  return {
+    exported: 0,
+    inserts: 0,
+    updates: 0,
+    skipped_nontext: 0,
+    skipped_oversize: 0,
+    failed: 0,
+    retried: 0,
+    dead_lettered: 0,
+    tombstones_removed_parts: 0,
+    tombstones_removed_sessions: 0,
+    lock_skipped: false,
+    last_cursor: cursor,
+  }
+}
+
+function applyCursorOverride(state: SyncState, cursor: ExportCursor | null | undefined): void {
+  if (cursor === undefined) return
+  state.legacy_cursor = cursor
+  state.insert_cursor.id = cursor?.id ?? ""
+  state.session_cursor = cursor && cursor.ts > 0 ? cursor : null
+  state.session_dirty_hints = {}
+}
+
+function retryFailedParts(
+  root: string,
+  state: SyncState,
+  progress: ExportProgress,
+  touchedSessions: Set<string>,
+  start: number,
+  budgetMs: number | undefined,
+  batchSize: number,
+  onProgress: ((p: ExportProgress) => void) | undefined,
+  heartbeat: () => void,
+): void {
+  const ids = Object.keys(state.failed_parts).sort().slice(0, batchSize)
+  for (const id of ids) {
+    if (timeExceeded(start, budgetMs)) break
+    progress.retried++
+    const row = loadPartById(id)
+    if (!row) {
+      clearPartFailure(state, id)
+      continue
+    }
+    exportPartRow(root, state, row, progress, touchedSessions)
+    reportProgress(progress, onProgress, heartbeat)
+  }
+}
+
+function runInsertFastPath(
+  root: string,
+  state: SyncState,
+  progress: ExportProgress,
+  touchedSessions: Set<string>,
+  start: number,
+  budgetMs: number | undefined,
+  batchSize: number,
+  onProgress: ((p: ExportProgress) => void) | undefined,
+  heartbeat: () => void,
+): void {
+  const recentSafeRows: PartExportRow[] = []
+  let scanCursor = state.insert_cursor.id
+  while (!timeExceeded(start, budgetMs)) {
+    const rows = loadPartRowsAfterId(scanCursor, batchSize)
+    if (rows.length === 0) break
+    for (const row of rows) {
+      if (timeExceeded(start, budgetMs)) break
+      scanCursor = row.id
+      const safe = exportPartRow(root, state, row, progress, touchedSessions)
+      if (safe) rememberSafeRow(recentSafeRows, row)
+      reportProgress(progress, onProgress, heartbeat)
+    }
+    if (rows.length < batchSize) break
+  }
+  if (recentSafeRows.length > 0) {
+    state.insert_cursor.id = chooseInsertCursor(state.insert_cursor.id, recentSafeRows, budgetMs !== undefined)
+  }
+}
+
+function runSessionDirtyFastPath(
+  root: string,
+  state: SyncState,
+  progress: ExportProgress,
+  touchedSessions: Set<string>,
+  start: number,
+  budgetMs: number | undefined,
+  batchSize: number,
+  onProgress: ((p: ExportProgress) => void) | undefined,
+  heartbeat: () => void,
+): void {
+  scanDirtySessionHints(state, start, budgetMs, Math.min(batchSize, 500))
+  for (const [sessionId, hint] of sortedDirtyHints(state.session_dirty_hints)) {
+    while (!timeExceeded(start, budgetMs)) {
+      const rows = loadSessionPartRows(sessionId, hint.part_cursor, batchSize)
+      if (rows.length === 0) {
+        delete state.session_dirty_hints[sessionId]
+        break
+      }
+      for (const row of rows) {
+        if (timeExceeded(start, budgetMs)) break
+        hint.part_cursor = row.id
+        exportPartRow(root, state, row, progress, touchedSessions)
+        reportProgress(progress, onProgress, heartbeat)
+      }
+      if (rows.length < batchSize) {
+        delete state.session_dirty_hints[sessionId]
+        break
+      }
+    }
+    if (timeExceeded(start, budgetMs)) break
+  }
+}
+
+function scanDirtySessionHints(state: SyncState, start: number, budgetMs: number | undefined, limit: number): void {
+  while (!timeExceeded(start, budgetMs)) {
+    const rows = loadDirtySessionsAfter(state.session_cursor, limit)
+    if (rows.length === 0) break
+    for (const row of rows) {
+      state.session_dirty_hints[row.id] = { time_updated: row.time_updated, part_cursor: null }
+      state.session_cursor = { ts: row.time_updated, id: row.id }
+    }
+    if (rows.length < limit) break
+  }
+}
+
+function exportPartRow(
+  root: string,
+  state: SyncState,
+  row: PartExportRow,
+  progress: ExportProgress,
+  touchedSessions: Set<string>,
+): boolean {
+  if (row.data_bytes > SAFETY_PART_CAP_BYTES) {
+    removeExistingPartExport(root, row.session_id, row.id)
+    progress.skipped_oversize++
+    markSafeCursor(state, progress, row)
+    clearPartFailure(state, row.id)
+    return true
+  }
+
+  try {
+    const session = getSession(row.session_id)
+    if (!session) throw new Error(`missing session ${row.session_id}`)
+    const archived = session.time_archived != null
+    const built = buildPartFile(row.id, row.session_id, row.message_id, row.data, archived)
+    if (!built) {
+      removeExistingPartExport(root, row.session_id, row.id)
+      progress.skipped_nontext++
+      markSafeCursor(state, progress, row)
+      clearPartFailure(state, row.id)
+      return true
+    }
+    const channelDocs = buildChannelDocuments(row.id, row.session_id, row.message_id, row.data, archived, row.role, session.directory)
+    const dir = join(root, "by-session", row.session_id)
+    if (!existsSync(dir)) { mkdirSync(dir, { recursive: true }); writeMeta(session, dir) }
+    const idx = getFileIndex(row.session_id, dir)
+    const existing = idx.byPartId.get(row.id)
+    if (existing) {
+      writePartFile(dir, existing, built.content)
+      progress.updates++
+    } else {
+      const filename = safePartFilename(idx.nextSeq++, row.id)
+      writePartFile(dir, filename, built.content)
+      idx.byPartId.set(row.id, filename)
+      progress.inserts++
+    }
+    const filename = idx.byPartId.get(row.id)
+    if (filename) writeChannelFiles(root, row.session_id, filename, row.id, channelDocs)
+    touchedSessions.add(row.session_id)
+    progress.exported++
+    markSafeCursor(state, progress, row)
+    clearPartFailure(state, row.id)
+    return true
+  } catch (error) {
+    progress.failed++
+    markPartFailure(state, row.id, errorMessage(error), progress)
+    return false
+  }
+}
+
+function removeExistingPartExport(root: string, sessionId: string, partId: string): void {
+  const dir = join(root, "by-session", sessionId)
+  try {
+    if (existsSync(dir)) {
+      const idx = getFileIndex(sessionId, dir)
+      const existing = idx.byPartId.get(partId)
+      if (existing) unlinkSync(join(dir, existing))
+      idx.byPartId.delete(partId)
+    }
+    deleteChannelPartFiles(root, sessionId, partId)
+  } catch { /* best effort stale-export cleanup */ }
+}
+
+function markSafeCursor(state: SyncState, progress: ExportProgress, row: PartExportRow): void {
+  const cursor = { ts: row.time_updated, id: row.id }
+  state.legacy_cursor = cursor
+  progress.last_cursor = cursor
+}
+
+function markPartFailure(state: SyncState, partId: string, message: string, progress: ExportProgress): void {
+  if (state.dead_letters[partId]) return
+  const now = Date.now()
+  const existing = state.failed_parts[partId]
+  const failure: FailedPartState = {
+    id: partId,
+    attempts: (existing?.attempts ?? 0) + 1,
+    first_failed_at: existing?.first_failed_at ?? now,
+    last_failed_at: now,
+    last_error: message,
+  }
+  if (failure.attempts >= MAX_FAILED_ATTEMPTS) {
+    state.dead_letters[partId] = failure
+    delete state.failed_parts[partId]
+    progress.dead_lettered++
+  } else {
+    state.failed_parts[partId] = failure
+  }
+}
+
+function clearPartFailure(state: SyncState, partId: string): void {
+  delete state.failed_parts[partId]
+}
+
+function rememberSafeRow(rows: PartExportRow[], row: PartExportRow): void {
+  rows.push(row)
+  const maxRows = INSERT_REWIND_MAX_ROWS * 4
+  if (rows.length > maxRows) rows.splice(0, rows.length - maxRows)
+}
+
+function chooseInsertCursor(previousId: string, rows: PartExportRow[], useRewind: boolean): string {
+  const last = rows[rows.length - 1]
+  if (!last || !useRewind || rows.length <= INSERT_REWIND_MAX_ROWS) return last?.id ?? previousId
+  const maxCreated = rows.reduce((max, row) => Math.max(max, row.time_created), 0)
+  const cutoff = maxCreated - INSERT_REWIND_MS
+  const timeIndex = rows.findIndex((row) => row.time_created >= cutoff)
+  const rewindIndex = Math.max(timeIndex <= 0 ? rows.length - INSERT_REWIND_MAX_ROWS : timeIndex - 1, rows.length - INSERT_REWIND_MAX_ROWS)
+  return rows[Math.max(0, rewindIndex)]?.id ?? last.id
+}
+
+function sortedDirtyHints(hints: Record<string, DirtySessionHint>): [string, DirtySessionHint][] {
+  return Object.entries(hints).sort((a, b) => a[1].time_updated - b[1].time_updated || a[0].localeCompare(b[0]))
+}
+
+function refreshTouchedSessions(root: string, touchedSessions: Set<string>): void {
+  for (const sid of touchedSessions) {
+    const dir = join(root, "by-session", sid)
+    const fresh = stmt(`
+      SELECT id, title, project_id, directory, agent, model, cost,
+             time_created, time_updated, time_archived, parent_id
+        FROM session WHERE id = ?`).get(sid) as SessionInfo | null
+    if (fresh) {
+      writeMeta(fresh, dir)
+      writeSessionSummaryChannel(fresh, root)
+    }
+  }
+}
+
+function applyTombstoneProgress(progress: ExportProgress, tombstones: TombstoneProgress): void {
+  progress.tombstones_removed_parts = tombstones.removed_parts
+  progress.tombstones_removed_sessions = tombstones.removed_sessions
+}
+
+function loadPartById(partId: string): PartExportRow | null {
+  return stmt(partSelectSql("WHERE p.id = ?")).get(partId) as PartExportRow | null
+}
+
+function loadPartRowsAfterId(afterId: string, limit: number): PartExportRow[] {
+  if (!afterId) return stmt(`${partSelectSql("")} ORDER BY p.id ASC LIMIT ?`).all(limit) as PartExportRow[]
+  return stmt(`${partSelectSql("WHERE p.id > ?")} ORDER BY p.id ASC LIMIT ?`).all(afterId, limit) as PartExportRow[]
+}
+
+function loadSessionPartRows(sessionId: string, afterId: string | null, limit: number): PartExportRow[] {
+  if (!afterId) {
+    return stmt(`${partSelectSql("WHERE p.session_id = ?")} ORDER BY p.id ASC LIMIT ?`).all(sessionId, limit) as PartExportRow[]
+  }
+  return stmt(`${partSelectSql("WHERE p.session_id = ? AND p.id > ?")} ORDER BY p.id ASC LIMIT ?`).all(sessionId, afterId, limit) as PartExportRow[]
+}
+
+function loadDirtySessionsAfter(cursor: ExportCursor | null, limit: number): DirtySessionRow[] {
+  if (!cursor) {
+    return stmt(`SELECT id, time_updated FROM session ORDER BY time_updated ASC, id ASC LIMIT ?`).all(limit) as DirtySessionRow[]
+  }
+  return stmt(`
+    SELECT id, time_updated
+      FROM session
+     WHERE (time_updated > ? OR (time_updated = ? AND id > ?))
+  ORDER BY time_updated ASC, id ASC
+     LIMIT ?`).all(cursor.ts, cursor.ts, cursor.id, limit) as DirtySessionRow[]
+}
+
+function partSelectSql(where: string): string {
+  return `
+    SELECT p.id, p.session_id, p.message_id, p.time_created, p.time_updated,
+           p.data, LENGTH(p.data) AS data_bytes,
+           json_extract(m.data,'$.role') AS role
+      FROM part p
+      LEFT JOIN message m ON m.id = p.message_id
+      ${where}`
+}
+
+function timeExceeded(start: number, budgetMs: number | undefined): boolean {
+  return budgetMs !== undefined && Date.now() - start > budgetMs
+}
+
+function reportProgress(progress: ExportProgress, onProgress: ((p: ExportProgress) => void) | undefined, heartbeat: () => void): void {
+  heartbeat()
+  if (!onProgress) return
+  const processed = progress.exported + progress.skipped_nontext + progress.skipped_oversize + progress.failed
+  if (processed > 0 && processed % 5000 === 0) onProgress(progress)
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 /** For tests. */

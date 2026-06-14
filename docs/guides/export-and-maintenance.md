@@ -55,12 +55,14 @@ maintenance.
    ```
 
 1. (Optional) Build the semantic index to unlock `sem` and `hybrid` search modes.
-   This is slow and only needs to run once. Run `ck --index .` from the export root,
-   not from the repository checkout:
+   This is slow and runs outside the plugin. Run it from the export root, not from
+   the repository checkout; use `ck --reindex .` when search warnings report a stale
+   or partially verified index:
 
    ```bash
    cd ~/.local/share/opencode-sessions-explorer
    ck --index .  # run in the export root, not the repo root
+   ck --reindex .  # explicit rebuild when stale/partial warnings appear
    ```
 
 1. Verify everything is wired up, and re-run after any OpenCode upgrade:

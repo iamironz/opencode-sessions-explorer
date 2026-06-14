@@ -26,8 +26,10 @@ known session, and audit individual tool invocations by name, status, or substri
 `search-text` and `grep-session` shell out to the optional [`ck`](https://github.com/BeaconBay/ck)
 CLI over the filesystem export tree. If `ck` is not installed, both return
 `CK_NOT_FOUND` cleanly; the other 16 tools keep working without it. Semantic modes
-additionally require a one-time `ck --index .` inside the export root — without it,
-`sem`/`hybrid` fall back to `regex` with a warning. See
+require an embedding index built outside the tool (`ck --index .` or
+`ck --reindex .` from the export root). Missing indexes fall back to `regex`; stale
+or partially verified indexes keep using `sem`/`hybrid` but warn that results may be
+incomplete. The tools never rebuild embeddings inline. See
 [search surfaces](../reference/search-surfaces.md) for the surface/channel model.
 
 ## Controls

@@ -48,9 +48,11 @@ Searchable content is materialized to a filesystem tree (default
 
 The tree is built once by `opencode-sessions-explorer-bulk-export` and then
 delta-synced automatically before each `search-text` / `grep-session` call, so new
-parts become searchable without a manual re-export. Sync is cursor-based on
-`(time_updated, id)`, which also re-exports parts whose status mutated since the last
-pass.
+parts become searchable without a manual re-export. Budgeted sync uses an id-cursor
+insert fast path for newly appended parts, plus session-dirty scans keyed by
+`session.time_updated` to re-export sessions whose part status or metadata changed.
+Short search-triggered syncs also schedule a throttled background reconcile, while
+unbudgeted bulk exports perform full tombstone cleanup inline.
 
 ### L3 — ck Index (Optional)
 
