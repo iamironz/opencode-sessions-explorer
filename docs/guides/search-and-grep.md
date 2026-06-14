@@ -25,11 +25,12 @@ known session, and audit individual tool invocations by name, status, or substri
 
 `search-text` and `grep-session` shell out to the optional [`ck`](https://github.com/BeaconBay/ck)
 CLI over the filesystem export tree. If `ck` is not installed, both return
-`CK_NOT_FOUND` cleanly; the other 16 tools keep working without it. Semantic modes
-require an embedding index built outside the tool (`ck --index .` or
-`ck --reindex .` from the export root). Missing indexes fall back to `regex`; stale
-or partially verified indexes keep using `sem`/`hybrid` but warn that results may be
-incomplete. The tools never rebuild embeddings inline. See
+`CK_NOT_FOUND` cleanly; the other 16 tools keep working without it. Normal `lex`,
+`sem`, and `hybrid` searches invoke `ck` in that mode so `ck` can lazily build or
+refresh its own indexes during the search. Explicit `ck --index .` or
+`ck --reindex .` runs from the export root are optional prewarm/troubleshooting
+steps, not required before first use. If an index is missing, stale, or partially
+verified, the tools warn that the first/lazy-refresh run may be slow or partial. See
 [search surfaces](../reference/search-surfaces.md) for the surface/channel model.
 
 ## Controls

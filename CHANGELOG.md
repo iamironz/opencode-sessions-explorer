@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-06-14
+
+### Fixed
+- `search-text` now preserves requested `sem`/`hybrid` modes when the `ck` semantic
+  index is missing, allowing `ck` to perform its normal lazy auto-indexing instead
+  of falling back to regex.
+
 ## [0.1.3] - 2026-06-14
 
 ### Fixed

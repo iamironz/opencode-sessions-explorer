@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ckIndexFreshness, runCk } from "../src/lib/ck.ts"
@@ -113,6 +113,60 @@ describe("ck helper freshness and coverage", () => {
     }))
   })
 
+  for (const mode of ["sem", "hybrid"] as const) {
+    test(`search-text keeps ${mode} mode when semantic index is missing`, async () => {
+      await withTempExportRoot(async () => withFakeBackgroundWorker(async () => {
+        const fakeRoot = tempRoot()
+        const argsLog = join(fakeRoot, "ck-args.log")
+        process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN = writeFakeCk(fakeRoot, { argsLog })
+
+        const env = await runTool(searchText, {
+          q: "needle",
+          mode,
+          surface: "forensics",
+          channels: ["raw"],
+          session_ids: [F.sessions.active],
+          limit: 3,
+          timeout_ms: 1000,
+        })
+
+        const ckArgs = readFileSync(argsLog, "utf8")
+        expect(env.ok).toBe(true)
+        expect(env.data.mode).toBe(mode)
+        expect(env.meta.mode).toBe(mode)
+        expect(env.meta.index_status).toBe("missing")
+        expect(ckArgs).toContain(`--${mode}`)
+        expect(ckArgs).not.toContain("--regex")
+        const warnings = (env.warnings ?? []).join(" ")
+        expect(warnings).toContain("lazily create or update")
+        expect(warnings).not.toContain("falling back to regex")
+      }))
+    })
+  }
+
+  test("search-text rechecks ck status after lazy semantic indexing", async () => {
+    await withTempExportRoot(async (root) => withFakeBackgroundWorker(async () => {
+      const fakeRoot = tempRoot()
+      process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN = writeFakeCk(fakeRoot, { lazyManifestRoot: root })
+
+      const env = await runTool(searchText, {
+        q: "needle",
+        mode: "sem",
+        surface: "forensics",
+        channels: ["raw"],
+        session_ids: [F.sessions.active],
+        limit: 3,
+        timeout_ms: 1000,
+      })
+
+      expect(env.ok).toBe(true)
+      expect(env.data.mode).toBe("sem")
+      expect(env.meta.mode).toBe("sem")
+      expect(env.meta.index_status).toBe("fresh")
+      expect((env.warnings ?? []).join(" ")).not.toContain("semantic index is missing")
+    }))
+  })
+
   test("search-text returns an explicit warning when scoped export remains missing", async () => {
     await withTempExportRoot(async (root) => withFakeBackgroundWorker(async () => {
       setSyncState({
@@ -211,16 +265,27 @@ function writeManifest(root: string, value: unknown): void {
   writeFileSync(join(dir, "manifest.json"), JSON.stringify(value))
 }
 
-function writeFakeCk(root: string, opts: { statusJson?: unknown; sleepSeconds?: string }): string {
+function writeFakeCk(root: string, opts: { statusJson?: unknown; sleepSeconds?: string; argsLog?: string; lazyManifestRoot?: string }): string {
   const path = join(root, "fake-ck")
   const statusJson = JSON.stringify(
     opts.statusJson ?? { status: "fresh", index_updated: Date.now() + 60_000, totals: { embedded_chunks: 1 } },
   )
   const sleep = opts.sleepSeconds ?? "0"
+  const argsLog = opts.argsLog ?? ""
+  const lazyManifestRoot = opts.lazyManifestRoot ?? ""
   writeFileSync(path, `#!/usr/bin/env bash
+args_log=${JSON.stringify(argsLog)}
+lazy_manifest_root=${JSON.stringify(lazyManifestRoot)}
+if [[ -n "$args_log" ]]; then
+  printf '%s\n' "$*" >> "$args_log"
+fi
 if [[ "$1" == "--status-json" ]]; then
   printf '%s\n' '${statusJson}'
   exit 0
+fi
+if [[ -n "$lazy_manifest_root" ]]; then
+  mkdir -p "$lazy_manifest_root/.ck"
+  printf '%s\n' '${statusJson}' > "$lazy_manifest_root/.ck/manifest.json"
 fi
 sleep ${sleep}
 scope="\${@: -1}"

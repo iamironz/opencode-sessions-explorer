@@ -61,6 +61,9 @@ CLI, which walks the export tree. `ck` supports plain regex with no index, a BM2
 full-text index, and semantic embeddings; the index lives under `.ck/` in the export
 root and is incremental. `ck` is optional: when it is absent these two tools return
 `CK_NOT_FOUND` cleanly and the other 16 tools are unaffected.
+The plugin invokes normal `lex`, `sem`, and `hybrid` `ck` searches and lets `ck`
+perform its lazy index build/refresh; explicit index commands are optional prewarm
+or troubleshooting steps, not a prerequisite for first use.
 
 ### L4 — Enriched Response
 
@@ -89,12 +92,12 @@ flag, so the direct database write is the only mechanism.
 
 ## Examples
 
-Materialize the export tree (L2), then build the optional `ck` index (L3):
+Materialize the export tree (L2), then optionally prewarm the `ck` index (L3):
 
 ```bash
 bunx opencode-sessions-explorer-bulk-export
 cd ~/.local/share/opencode-sessions-explorer
-ck --index .   # run in the export root, not the repository checkout
+ck --index .   # optional prewarm from the export root
 ```
 
 Verify all four layers are healthy:

@@ -8,8 +8,8 @@
  * Modes:
  *   regex   — drop-in grep, no index needed (default; works always)
  *   lex     — BM25 full-text (auto-builds Tantivy index)
- *   sem     — semantic embeddings (requires `ck --index .` to be run separately)
- *   hybrid  — combined regex + semantic (requires index)
+ *   sem     — semantic embeddings (ck lazily builds/refreshes the index)
+ *   hybrid  — combined regex + semantic (ck lazily builds/refreshes the index)
  *
  * SCOPING: cross-session content search has unbounded fan-out. To keep response
  * times reasonable, callers SHOULD pre-filter via session_ids / project_id /
@@ -20,7 +20,7 @@
 import { tool } from "@opencode-ai/plugin"
 import { stmt } from "../lib/db.js"
 import { runWithEnvelope } from "../lib/envelope.js"
-import { runCk, ckIndexFreshness, type CkIndexStatus, type CkScopeCoverage } from "../lib/ck.js"
+import { runCk, ckIndexFreshness, type CkIndexFreshness, type CkIndexStatus, type CkScopeCoverage } from "../lib/ck.js"
 import { channelExportComplete, runExport, exportRoot } from "../lib/export.js"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
@@ -39,7 +39,7 @@ export const searchText = tool({
     "CRITICAL ARG `role` (default 'any'): which message roles to search inside. **Default to 'any'** for natural-language questions like \"where did I mention X\", \"find sessions about Y\", \"did I discuss Z\" — these are asking about appearances ANYWHERE in your conversations (user prompts AND assistant text AND tool I/O AND reasoning). " +
     "Only set role='user' when the user EXPLICITLY narrows to authored messages: \"what prompts have I typed containing X\", \"my user-authored messages mentioning Y\", \"questions I sent OpenCode with Z\". Phrases like \"did I mention\" / \"in my history\" / \"have I discussed\" do NOT imply role='user' — those are asking about the corpus as a whole. " +
     "Only set role='assistant' for questions explicitly about what the AI said (\"what has the assistant said about X\"). " +
-    "Modes: 'regex' (default — drop-in grep, no index needed), 'lex' (BM25 phrase search, auto-builds Tantivy index), 'sem' (semantic embeddings, requires `ck --index .` to be run once outside this tool), 'hybrid' (regex + sem). " +
+    "Modes: 'regex' (default — drop-in grep, no index needed), 'lex' (BM25 phrase search, lets ck auto-build/update its Tantivy index), 'sem' (semantic embeddings, lets ck lazily build/refresh its index), 'hybrid' (regex + sem). " +
     "Pre-filter cross-session searches via session_ids[], project_id, agent, since_ms/until_ms — unscoped full-corpus search can take 10-30 seconds. Scoped searches return in <1s. " +
     "For grep INSIDE a single known session use grep-session instead (faster, narrower).",
   args: {
@@ -99,20 +99,13 @@ export const searchText = tool({
           : { hits: table([]), mode: args.mode, scope_session_count: scopeIds.length, ck_duration_ms: 0 }
       }
 
-      // For sem/hybrid, check index presence
+      // For sem/hybrid, check index presence but still call ck in the requested
+      // mode so ck's own lazy auto-indexing can run during normal search.
       let effectiveMode = args.mode
+      let preSearchFreshness: CkIndexFreshness | null = null
       if (args.mode === "sem" || args.mode === "hybrid") {
-        const freshness = await ckIndexFreshness(root)
-        ctx.indexStatus = combineExportAndCkStatus(exportStatus, freshness.status)
-        if (freshness.warning) ctx.warnings.push(freshness.warning)
-        if (freshness.status === "missing") {
-          ctx.warnings.push("ck semantic index missing; falling back to regex for this request.")
-          effectiveMode = "regex"
-          ctx.mode = "fallback-regex"
-        } else if (freshness.status !== "fresh") {
-          const chunks = freshness.embedded_chunks != null ? ` (${freshness.embedded_chunks} embedded chunks)` : ""
-          ctx.warnings.push(`ck semantic index status is ${freshness.status}${chunks}; sem/hybrid results are partial until an explicit ck rebuild is run.`)
-        }
+        preSearchFreshness = await ckIndexFreshness(root)
+        ctx.indexStatus = combineExportAndCkStatus(exportStatus, preSearchFreshness.status)
       }
       if (!ctx.mode) ctx.mode = effectiveMode
 
@@ -122,7 +115,9 @@ export const searchText = tool({
         ? Math.min(Math.max(args.limit * 20, 100), 500)
         : Math.min(args.limit * (effectiveMode === "regex" ? 2 : 3), 150)
 
-      return await runWithCk(args, scopes, effectiveMode, ctx, scopeIds === "all" ? null : scopeIds.length, ckTopk, channels, surface, groupBySession)
+      const result = await runWithCk(args, scopes, effectiveMode, ctx, scopeIds === "all" ? null : scopeIds.length, ckTopk, channels, surface, groupBySession)
+      if (preSearchFreshness) await refreshCkStatusAfterSearch(ctx, root, exportStatus, preSearchFreshness)
+      return result
     })
   },
 })
@@ -407,6 +402,19 @@ function combineExportAndCkStatus(exportStatus: "fresh" | "stale", ckStatus: CkI
   if (ckStatus === "missing" || ckStatus === "partial") return ckStatus
   if (exportStatus === "stale") return "stale"
   return ckStatus
+}
+
+async function refreshCkStatusAfterSearch(ctx: any, root: string, exportStatus: "fresh" | "stale", preSearchFreshness: CkIndexFreshness): Promise<void> {
+  try {
+    const postSearchFreshness = await ckIndexFreshness(root)
+    ctx.indexStatus = combineExportAndCkStatus(exportStatus, postSearchFreshness.status)
+    if (postSearchFreshness.status !== "fresh") {
+      ctx.warnings.push(postSearchFreshness.warning ?? preSearchFreshness.warning ?? "ck semantic index freshness is not verified after search; results may be partial.")
+    }
+  } catch (e) {
+    ctx.indexStatus = combineExportAndCkStatus(exportStatus, preSearchFreshness.status)
+    ctx.warnings.push(preSearchFreshness.warning ?? `ck semantic index freshness recheck failed after search: ${(e as Error).message}`)
+  }
 }
 
 function warnOnPartialScopeCoverage(ctx: any, coverage: CkScopeCoverage, timeoutMs: number): void {

@@ -4,7 +4,7 @@
  * ck modes:
  *   regex   — drop-in grep, no index needed (fast on small scope)
  *   lex     — BM25 full-text, auto-builds Tantivy index
- *   sem     — semantic embeddings, requires `ck --index .` (slow to build)
+ *   sem     — semantic embeddings, lazily builds/refreshes the ck index
  *   hybrid  — RRF of regex + semantic
  *
  * We use `--jsonl` for structured output. Each line is one hit:
@@ -314,11 +314,11 @@ function statusFromProbe(
 }
 
 function ckIndexWarning(status: CkIndexStatus, root: string, probeFailure?: string | null): string {
-  const rebuild = `Run 'cd "${root}" && ck --reindex .' (or 'ck --index .') externally; opencode-sessions-explorer will not rebuild embeddings inline.`
-  if (status === "missing") return `ck semantic index is missing at ${root}/.ck. ${rebuild}`
-  if (status === "stale") return `ck semantic index appears stale relative to the export tree; sem/hybrid results may omit recently exported files. ${rebuild}`
+  const prewarm = `opencode-sessions-explorer will not call ck --index or ck --reindex inline; run 'cd "${root}" && ck --index .' or 'ck --reindex .' only to prewarm or troubleshoot.`
+  if (status === "missing") return `ck semantic index is missing at ${root}/.ck. ck will lazily create or update the index during sem/hybrid search; the first run may be slow. ${prewarm}`
+  if (status === "stale") return `ck semantic index appears stale relative to the export tree; ck will attempt a lazy refresh during sem/hybrid search. Results may be partial if refresh fails or times out. ${prewarm}`
   const reason = probeFailure ? ` (${probeFailure})` : ""
-  return `ck semantic index freshness is partial/unverified${reason}; sem/hybrid results may cover only indexed files. ${rebuild}`
+  return `ck semantic index freshness is partial/unverified${reason}; ck will attempt lazy index refresh during sem/hybrid search. Results may cover only indexed files if refresh fails or times out. ${prewarm}`
 }
 
 function exportMarkerMtime(root: string): number | null {

@@ -54,13 +54,14 @@ history, then branch into the right workflow guide.
    bunx opencode-sessions-explorer-bulk-export
    ```
 
-1. (Optional) Build the semantic index to enable `mode:'sem'` and `mode:'hybrid'`
-   search. This is a slow, one-time pass. Run it in the export root, not in the
-   repository checkout:
+1. (Optional) Prewarm the `ck` index. Normal `mode:'lex'`, `mode:'sem'`, and
+   `mode:'hybrid'` searches let `ck` lazily build or refresh indexes during the
+   search; prewarming only avoids first-search latency or helps troubleshooting.
+   Run it in the export root, not in the repository checkout:
 
    ```bash
    cd ~/.local/share/opencode-sessions-explorer
-   ck --index .  # run in the export root, not the repo root
+   ck --index .  # optional prewarm in the export root
    ```
 
 1. Run the install health probe again and confirm there are no hard failures:

@@ -54,15 +54,16 @@ maintenance.
    bunx opencode-sessions-explorer-bulk-export --reset
    ```
 
-1. (Optional) Build the semantic index to unlock `sem` and `hybrid` search modes.
-   This is slow and runs outside the plugin. Run it from the export root, not from
-   the repository checkout; use `ck --reindex .` when search warnings report a stale
-   or partially verified index:
+1. (Optional) Prewarm the `ck` index. Normal `lex`, `sem`, and `hybrid` searches
+   invoke `ck` in the requested mode so `ck` can lazily build or refresh indexes
+   during the search. Run these commands only to avoid first-search latency or to
+   troubleshoot stale/partial coverage warnings, and run them from the export root,
+   not from the repository checkout:
 
    ```bash
    cd ~/.local/share/opencode-sessions-explorer
-   ck --index .  # run in the export root, not the repo root
-   ck --reindex .  # explicit rebuild when stale/partial warnings appear
+   ck --index .  # optional prewarm in the export root
+   ck --reindex .  # optional troubleshooting refresh
    ```
 
 1. Verify everything is wired up, and re-run after any OpenCode upgrade:

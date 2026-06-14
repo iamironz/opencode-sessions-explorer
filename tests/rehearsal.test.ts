@@ -611,13 +611,12 @@ describe.skipIf(!LIVE)("search_text", () => {
     expect(r.data.hits.length).toBeLessThanOrEqual(5)
     expect(r.meta.bytes_returned).toBeLessThan(160 * 1024)
   }, 30000)
-  test("TX-M sem mode falls back to regex when index missing or partial", async () => {
+  test("TX-M sem mode stays semantic so ck can lazy-index", async () => {
     const r = await runTool(searchText, { q: "review", mode: "sem", session_ids: [F.sessions.active], limit: 3 })
     expect(r.ok).toBe(true)
-    // Either we got semantic hits OR we got regex fallback warning
     const warns = (r.warnings ?? []).join(" ")
-    const usedFallback = r.meta.mode === "fallback-regex" || warns.includes("falling back to regex")
-    expect(usedFallback || r.data.hits.length >= 0).toBe(true)
+    expect(r.meta.mode).toBe("sem")
+    expect(warns).not.toContain("falling back to regex")
   }, 30000)
   test("TX-S nonexistent session scope → empty", async () => {
     const r = await runTool(searchText, { q: "anything", session_ids: [F.sessions.missing], limit: 3 })

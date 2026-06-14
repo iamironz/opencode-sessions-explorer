@@ -99,7 +99,7 @@ try {
     if (existsSync(root)) {
       const idx = ckIndexPresent(root)
       if (idx.present) pass("ck index", idx.embedded_chunks != null ? `present (${idx.embedded_chunks} embedded chunks)` : "present")
-      else warn("ck index", "not built", "For semantic search: `cd " + root + " && ck --index .` (slow, one-time, ~5h for ~150k parts)")
+      else warn("ck index", "not built", "Semantic search will ask ck to lazily build the index; optionally prewarm with `cd " + root + " && ck --index .`.")
     }
   } else {
     warn("ck CLI", `${ckBin} returned ${r.status}: ${(r.stderr ?? "").slice(0, 120)}`, "Reinstall via `cargo install ck-search`.")
