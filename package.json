@@ -68,7 +68,7 @@
     "zod": "^4.0.0"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "1.17.4",
+    "@opencode-ai/plugin": "1.17.8",
     "@types/bun": "latest",
     "typescript": "^6.0.3"
   }
