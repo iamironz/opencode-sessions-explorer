@@ -8,6 +8,10 @@
  *   - busy_timeout honoured
  *   - schema head + drift
  *   - Sessions-export tree present + size
+ *   - ripgrep (rg) binary present + version — required for `regex` mode and
+ *     the exhaustive fallback tier
+ *   - FTS5 sidecar present + doc/byte/channel/cursor stats — the fast literal
+ *     + BM25 backend; ck is reserved for `sem`/`hybrid` only
  *   - ck binary present + version + index status
  *   - Disk space
  *
@@ -27,6 +31,8 @@ import { locateDb } from "../lib/db.js"
 import { getSchemaState } from "../lib/schema.js"
 import { channelExportComplete, exportRoot } from "../lib/export.js"
 import { locateCk, ckIndexPresent } from "../lib/ck.js"
+import { locateRg, rgAvailable } from "../lib/rg.js"
+import { ftsPresent, ftsStats } from "../lib/fts.js"
 
 const json = process.argv.includes("--json")
 type Status = "ok" | "warn" | "fail"
@@ -88,7 +94,42 @@ if (existsSync(root)) {
   warn("Export tree", `${root} not yet built`, "Run `opencode-sessions-explorer-bulk-export` to populate. Text search will return empty until then.")
 }
 
-// 4. ck binary
+// 4. ripgrep (rg) — required for `regex` mode and the exhaustive fallback tier
+try {
+  const rgBin = locateRg()
+  const r = spawnSync(rgBin, ["--version"], { encoding: "utf8" })
+  if (r.status === 0) {
+    const ver = (r.stdout ?? "").trim().split("\n")[0]
+    pass("ripgrep (rg)", `${rgBin} (${ver})`)
+  } else if (rgAvailable()) {
+    warn("ripgrep (rg)", `${rgBin} returned ${r.status}: ${(r.stderr ?? "").slice(0, 120)}`, "Install with `brew install ripgrep` (macOS) or your package manager.")
+  } else {
+    fail("ripgrep (rg)", `not found at ${rgBin}`, "Install with `brew install ripgrep`. Required for `regex` mode and the exhaustive fallback search tier; the other tiers (fts literal/lex, ck sem/hybrid) work without it.")
+  }
+} catch {
+  fail("ripgrep (rg)", "not found in $PATH or common locations", "Install with `brew install ripgrep`. Required for `regex` mode and the exhaustive fallback search tier; the other tiers (fts literal/lex, ck sem/hybrid) work without it.")
+}
+
+// 5. FTS5 sidecar — the fast literal + BM25 backend (replaces ck for lex/literal)
+try {
+  if (ftsPresent(root)) {
+    const s = ftsStats(root)
+    const mb = (s.bytes / 1024 / 1024).toFixed(1)
+    pass("FTS sidecar", `${s.docs} docs, ${mb} MB, channels=[${s.channels.join(", ")}], cursor=${s.cursor ? s.cursor.id : "(none)"}`)
+    if (s.lastError) warn("FTS sidecar", `present but last check reported: ${s.lastError}`)
+  } else {
+    const s = ftsStats(root)
+    if (s.lastError) {
+      fail("FTS sidecar", `not usable: ${s.lastError}`, "Run `opencode-sessions-explorer-fts-build` to (re)build the index.")
+    } else {
+      warn("FTS sidecar", "not built", "Run `opencode-sessions-explorer-fts-build` to enable millisecond literal + BM25 search. Search falls back to ripgrep/ck without it.")
+    }
+  }
+} catch (e) {
+  warn("FTS sidecar", `probe failed: ${(e as Error).message}`, "Run `opencode-sessions-explorer-fts-build` to (re)build the index.")
+}
+
+// 6. ck binary
 try {
   const ckBin = locateCk()
   const r = spawnSync(ckBin, ["--version"], { encoding: "utf8" })
@@ -105,10 +146,10 @@ try {
     warn("ck CLI", `${ckBin} returned ${r.status}: ${(r.stderr ?? "").slice(0, 120)}`, "Reinstall via `cargo install ck-search`.")
   }
 } catch {
-  warn("ck CLI", "not found in $PATH or common locations", "Install with `cargo install ck-search` for search-text + grep-session tools. Other 16 tools work without ck.")
+  warn("ck CLI", "not found in $PATH or common locations", "Install with `cargo install ck-search` for search-text's sem/hybrid modes. grep-session no longer uses ck (it is ripgrep-only); every other tool, including search-text's regex/lex modes, works without ck.")
 }
 
-// 5. tool-output dir (for get-part dereference)
+// 7. tool-output dir (for get-part dereference)
 const toolOutputDir = (() => {
   if (process.env.OPENCODE_SESSIONS_EXPLORER_TOOL_OUTPUT_DIR) return process.env.OPENCODE_SESSIONS_EXPLORER_TOOL_OUTPUT_DIR
   const home = process.env.HOME ?? ""

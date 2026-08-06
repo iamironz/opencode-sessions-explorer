@@ -29,7 +29,8 @@ Unarchive session ses_… so I can open it again.
 | --- | --- | --- |
 | OpenCode | Plugin host compatible with `@opencode-ai/plugin >= 1.15.0` | Loads the plugin and owns the source database |
 | Bun | `>= 1.0` | Runtime; the plugin uses `bun:sqlite` (OpenCode ships Bun), which should include SQLite `json1`; `check-deps` / `db-stats` verify it |
-| `ck` | `>= 0.7`, optional | Only `search-text` / `grep-session` need it; the other 16 tools work without it |
+| `ripgrep` (`rg`) | Required whenever it is the primary search backend | Backs `regex` mode, the exhaustive fallback tier, and every `grep-session` call; `check-deps` verifies it. A missing `rg` returns a hard `RG_NOT_FOUND` error for a query that needs it, rather than silently degrading. |
+| `ck` | `>= 0.7`, optional | Only `sem`/`hybrid` search modes need it; every other tool, including literal/`lex`/`regex` search, works without it |
 | OS | macOS / Linux | Windows paths resolve via `%LOCALAPPDATA%` |
 
 ## Quick Start
@@ -58,8 +59,9 @@ above is preferred for normal users.
 
 1. **Quit and restart OpenCode.** All 18 tools auto-register. OpenCode auto-installs
    npm plugins with Bun on startup, so there is no separate `npm install` step.
-1. Run the health probe once. Warnings for the missing export tree, missing `ck`, or
-   missing `ck` index are okay at this stage:
+1. Run the health probe once. Warnings for the missing export tree, missing FTS
+   index, missing `ck`, or missing `ck` index are okay at this stage; a hard
+   failure on the ripgrep line means installing `rg` first:
 
 ```bash
 bunx opencode-sessions-explorer-check-deps
@@ -71,16 +73,25 @@ bunx opencode-sessions-explorer-check-deps
 bunx opencode-sessions-explorer-bulk-export
 ```
 
+1. Build the FTS sidecar index once so literal (3+ character) and `lex`
+   search can use the fast indexed path instead of ripgrep. Let it run to
+   completion — a run stopped early leaves the index partial:
+
+```bash
+bunx opencode-sessions-explorer-fts-build
+```
+
 1. (Optional) Prewarm the `ck` index from the export root, not the repo root.
-   Normal `lex`, `sem`, and `hybrid` searches ask `ck` to build or refresh indexes
-   lazily, so this step is only for avoiding first-search latency or troubleshooting:
+   `ck` is only used by `sem`/`hybrid` search modes, and those normally ask `ck`
+   to build or refresh its index lazily, so this step is only for avoiding
+   first-search latency or troubleshooting:
 
 ```bash
 cd ~/.local/share/opencode-sessions-explorer
 ck --index .  # run in the export root, not the repo root
 ```
 
-1. Run the health probe again to confirm the export and optional index state:
+1. Run the health probe again to confirm the export, FTS index, and optional `ck` state:
 
 ```bash
 bunx opencode-sessions-explorer-check-deps
@@ -126,13 +137,17 @@ full first-run walkthrough, see [docs/install.md](docs/install.md) and
 
 ### Export and Maintenance
 
-- **One-time export.** `bulk-export` materializes searchable session content for `ck`.
-- **Stay current.** The plugin auto-syncs new parts before each search call, then
-  lets normal `lex`, `sem`, and `hybrid` `ck` searches lazily build or refresh their
-  indexes. Explicit `ck --index .` / `ck --reindex .` runs are optional prewarm or
-  troubleshooting steps for stale or partial coverage warnings.
-- **Health probe.** `check-deps` and the `db-stats` tool report dependency and schema
-  health.
+- **One-time export.** `bulk-export` materializes searchable session content on
+  disk; `fts-build` builds the SQLite FTS5 sidecar that backs fast literal/`lex`
+  search.
+- **Stay current.** `search-text` delta-syncs the FTS sidecar directly from
+  SQLite on each call (skipping the filesystem export entirely for that path);
+  ripgrep and `ck` searches delta-sync the filesystem export instead. `sem`/
+  `hybrid` `ck` searches lazily build or refresh the `ck` index; explicit
+  `ck --index .` / `ck --reindex .` runs are optional prewarm or troubleshooting
+  steps.
+- **Health probe.** `check-deps` and the `db-stats` tool report dependency,
+  schema, ripgrep, and FTS sidecar health.
 - See [docs/guides/export-and-maintenance.md](docs/guides/export-and-maintenance.md).
 
 ### Archived Session Recovery

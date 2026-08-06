@@ -11,7 +11,8 @@ history, then branch into the right workflow guide.
 | --- | --- |
 | OpenCode | A working OpenCode install that has run at least once (it owns the source database) and a plugin host compatible with `@opencode-ai/plugin >= 1.15.0` |
 | Bun | `>= 1.0` runtime; the plugin uses `bun:sqlite`, which should include SQLite `json1`. OpenCode ships Bun, so a standalone install is only needed to run the bundled CLIs directly. `check-deps` / `db-stats` verify it. |
-| `ck` (optional) | [`ck`](https://github.com/BeaconBay/ck) `>= 0.7`, required only by `search-text` and `grep-session`; the other 16 tools work without it |
+| `ripgrep` (`rg`) | Required whenever the search planner picks it as the primary backend — `regex` mode, the exhaustive fallback tier, and every `grep-session` call. Install via `brew install ripgrep` (macOS), `apt install ripgrep` (Debian/Ubuntu), or `cargo install ripgrep`. `check-deps` verifies it; a missing `rg` returns a hard `RG_NOT_FOUND` error for a query that needs it, rather than silently falling back to `ck`. |
+| `ck` (optional) | [`ck`](https://github.com/BeaconBay/ck) `>= 0.7`, required only by `sem`/`hybrid` search modes; every other tool, including literal/`lex`/`regex` search and all of `grep-session`, works without it |
 
 ## Steps
 
@@ -42,26 +43,41 @@ history, then branch into the right workflow guide.
    there is no separate `npm install` step, and all 18 tools auto-register.
 
 1. Run the install health probe before exporting. Warnings for a missing export
-   tree, missing `ck`, or missing `ck` index are expected on a fresh install:
+   tree, missing FTS index, missing `ck`, or missing `ck` index are expected on a
+   fresh install; a **failure** on the ripgrep line means `regex`-mode search
+   will not work until it is installed (`brew install ripgrep` on macOS,
+   `apt install ripgrep` on Debian/Ubuntu, or `cargo install ripgrep`):
 
    ```bash
    bunx opencode-sessions-explorer-check-deps
    ```
 
-1. Materialize the searchable export tree once so content search has data to scan:
+1. Materialize the searchable export tree once so ripgrep/`ck` search have data
+   to scan:
 
    ```bash
    bunx opencode-sessions-explorer-bulk-export
    ```
 
-1. (Optional) Prewarm the `ck` index. Normal `mode:'lex'`, `mode:'sem'`, and
-   `mode:'hybrid'` searches let `ck` lazily build or refresh indexes during the
-   search; prewarming only avoids first-search latency or helps troubleshooting.
-   Run it in the export root, not in the repository checkout:
+1. Build the FTS5 sidecar once so literal (3+ character) and `lex` search
+   can use the fast indexed path instead of ripgrep. Let it run to
+   completion — a run stopped early with `--budget-ms` leaves the index
+   partial, and `fts-build` prints `COMPLETE = false` and a warning when
+   that happens:
+
+   ```bash
+   bunx opencode-sessions-explorer-fts-build
+   ```
+
+1. (Optional) Prewarm the `ck` index. This only matters for `mode:'sem'` and
+   `mode:'hybrid'` searches, which otherwise let `ck` lazily build or refresh
+   indexes during the search; prewarming only avoids first-search latency or
+   helps troubleshooting. Run it in the export root, not in the repository
+   checkout:
 
    ```bash
    cd ~/.local/share/opencode-sessions-explorer
-   ck --index .  # optional prewarm in the export root
+   ck --index .  # optional prewarm in the export root; sem/hybrid only
    ```
 
 1. Run the install health probe again and confirm there are no hard failures:
@@ -73,9 +89,10 @@ history, then branch into the right workflow guide.
 ## Validate
 
 1. Read the final `check-deps` output. It reports database reachability, schema and
-   drift, SQLite `json1`, `busy_timeout`, export tree, channel views, `ck` CLI,
-   `ck` index, and tool-output directory status. Exit code `0` means all green, `1`
-   means optional pieces are missing, and `2` means the plugin cannot work yet.
+   drift, SQLite `json1`, `busy_timeout`, export tree, channel views, ripgrep
+   binary + version, FTS sidecar health, `ck` CLI, `ck` index, and tool-output
+   directory status. Exit code `0` means all green, `1` means optional pieces are
+   missing, and `2` means the plugin cannot work yet.
 
 1. In OpenCode, ask an orientation question such as "what session am I in?" — the
    model routes to `current-session` and returns this session's id, agent, model,

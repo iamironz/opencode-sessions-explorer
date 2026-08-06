@@ -45,17 +45,29 @@ message bodies.
 | `list-sessions` | Browses sessions newest-first with combinable structured filters: `project_id`, `agent`, `model_id`, `directory_prefix`, `archived`, `since_ms`/`until_ms`, and `title_like`. Cursor-paginated. | Read |
 | `search-sessions-meta` | Filters sessions by structured metadata plus cost/token thresholds (`min_cost`, `min_tokens_input`) — the same envelope as `list-sessions` with spend filters added. | Read |
 
-## Content Search (ck-backed)
+## Content Search (fts / rg / ck — automatic backend selection)
 
 Search the bodies of sessions and the tool calls inside them. `search-text` and
-`grep-session` shell out to the optional [`ck`](https://github.com/BeaconBay/ck)
-CLI; if `ck` is absent they return `CK_NOT_FOUND` cleanly and the other tools keep
-working. `search-tool-calls` queries the database directly and does not need `ck`.
+`grep-session` never make you pick a search engine: a query planner
+(`src/lib/query-plan.ts`) routes each query to a SQLite FTS5 sidecar (literal
+substring or `lex`/BM25, typically single-digit to low-hundreds of
+milliseconds — see [architecture.md](architecture.md#latency) for measured
+numbers and the 3-character trigram floor below which a query is routed to
+ripgrep instead), ripgrep (real regex, `grep-session`'s only backend, and the
+fallback for anything the FTS tier cannot serve), or the optional
+[`ck`](https://github.com/BeaconBay/ck) CLI (`sem`/`hybrid` only). When a
+query needs ripgrep as its primary backend and `rg` is missing, the call
+returns a hard `RG_NOT_FOUND` error rather than degrading — `grep-session` in
+particular always needs `rg`, so a missing binary fails every
+`grep-session` call. If `ck` is absent, only `sem`/`hybrid` `search-text`
+calls return `CK_NOT_FOUND` — every other search path, including all of
+`grep-session`, keeps working. `search-tool-calls` queries the database
+directly and needs neither.
 
 | Tool | What It Does | Read/Write |
 | --- | --- | --- |
-| `search-text` | Full-text search across the bodies of all sessions (user prompts, assistant responses, tool input/output, reasoning, file references, patches, subtask prompts). Surface- and channel-aware; supports `regex`, `lex` (BM25), `sem`, and `hybrid` modes, a `role` filter, and `group_by_session` rollups. | Read |
-| `grep-session` | grep/regex search inside one session's exported body content (fast; operates on that session's part files only). Supports `fixed_string`, `case_sensitive`, `whole_word`, and `context_lines`. | Read |
+| `search-text` | Full-text search across the bodies of all sessions (user prompts, assistant responses, tool input/output, reasoning, file references, patches, subtask prompts). Surface- and channel-aware; supports `regex`, `lex` (BM25), `sem`, and `hybrid` modes, a `role` filter, and `group_by_session` rollups. Response includes `backend` (`fts`/`rg`/`ck`), `backends_tried`, `plan_reason`, `literal`, and `search_duration_ms` alongside the existing `recall_strategy`, `ck_duration_ms`, `ck_timed_out`, and `ck_scope_coverage` fields. | Read |
+| `grep-session` | grep/regex search inside one session's exported body content via ripgrep (fast; operates on that session's part files only; no `ck` dependency). Supports `fixed_string`, `case_sensitive`, `whole_word`, and `context_lines`. | Read |
 | `search-tool-calls` | Finds tool invocations across sessions, filtered by tool name (exact or `LIKE` wildcard), status, or substring on input/output/error. Returns capped snippets; cursor-paginated, newest-first. | Read |
 
 ## Cost And Usage Analysis
@@ -73,7 +85,7 @@ Aggregate spend, tokens, failures, and prompt patterns.
 
 | Tool | What It Does | Read/Write |
 | --- | --- | --- |
-| `db-stats` | Health and schema-drift probe for the OpenCode SQLite database: migration head, table counts (session/message/part), json1 status, `busy_timeout`, and drift warnings. | Read |
+| `db-stats` | Health and schema-drift probe for the OpenCode SQLite database: migration head, table counts (session/message/part), json1 status, `busy_timeout`, drift warnings, and an additive `fts` section: `present`, `complete`, `docs`, `bytes`, `channels`, `cursor`, `at_source`, `lag_ms`, `failed_parts`, `dead_letters`, `case_folding_ascii_only`, `last_error`. | Read |
 
 ## Write
 
@@ -97,9 +109,10 @@ maintaining the search export and for verifying install health.
 
 | Executable | What It Does |
 | --- | --- |
-| `opencode-sessions-explorer-bulk-export` | Materializes (and incrementally refreshes) the filesystem search export tree. `--reset` rebuilds from scratch; `--root <path>` targets a non-default export root. |
+| `opencode-sessions-explorer-bulk-export` | Materializes (and incrementally refreshes) the filesystem search export tree that ripgrep and `ck` search. `--reset` rebuilds from scratch; `--root <path>` targets a non-default export root. |
+| `opencode-sessions-explorer-fts-build` | Builds/refreshes the SQLite FTS5 sidecar directly from the OpenCode database (not the filesystem export tree) that backs fast literal + `lex` search. Idempotent and resumable via a cursor stored inside the sidecar. `--reset` rebuilds from cursor zero; `--budget-ms N` stops after N ms. |
 | `opencode-sessions-explorer-dedupe-export` | One-shot maintenance that removes duplicate part files (same part id, different sequence prefix). Dry-run by default; pass `--apply` to delete. |
-| `opencode-sessions-explorer-check-deps` | Install health probe: database reachability, schema head and drift, SQLite `json1`, `busy_timeout`, export tree, channel views, `ck` CLI and index, and tool-output directory. `--json` emits machine-readable output. |
+| `opencode-sessions-explorer-check-deps` | Install health probe: database reachability, schema head and drift, SQLite `json1`, `busy_timeout`, export tree, channel views, ripgrep binary + version, FTS sidecar health, `ck` CLI and index, and tool-output directory. `--json` emits machine-readable output. |
 
 ## Examples
 
@@ -125,8 +138,9 @@ opencode-sessions-explorer-search-text { "q": "retry backoff", "group_by_session
 Fresh install health flow:
 
 ```bash
-bunx opencode-sessions-explorer-check-deps  # warnings for missing export/ck are okay initially
+bunx opencode-sessions-explorer-check-deps  # warnings for missing export/fts-index/ck are okay initially
 bunx opencode-sessions-explorer-bulk-export
+bunx opencode-sessions-explorer-fts-build
 bunx opencode-sessions-explorer-check-deps
 ```
 
@@ -142,7 +156,7 @@ opencode-sessions-explorer-unarchive-session { "session_id": "ses_…" }
 - Configuration and environment overrides: [configuration.md](configuration.md)
 - Search surfaces and channels: [search-surfaces.md](search-surfaces.md)
 - Compact result format: [response-format.md](response-format.md)
-- Four-layer architecture: [architecture.md](architecture.md)
+- Architecture and query planner: [architecture.md](architecture.md)
 - Recall and navigation workflow: [../guides/recall-and-navigation.md](../guides/recall-and-navigation.md)
 - Search and grep workflow: [../guides/search-and-grep.md](../guides/search-and-grep.md)
 - Cost and usage analysis workflow: [../guides/cost-and-usage-analysis.md](../guides/cost-and-usage-analysis.md)

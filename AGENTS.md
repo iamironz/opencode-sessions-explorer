@@ -8,15 +8,17 @@ catalog; `CHANGELOG.md` tracks status.
 
 ## Commands
 
-| Task                 | Command                                  |
-| -------------------- | ---------------------------------------- |
-| Install              | `bun install`                            |
-| Typecheck            | `bun run typecheck` (`tsc --noEmit`)     |
-| Test (full suite)    | `bun test`                               |
-| Single test file     | `bun test tests/codec.test.ts`           |
-| Build to `dist/`     | `bun run build`                          |
-| E2E verify vs SQL    | `bun tests/verify-end-to-end.ts`         |
-| Install health probe | `bun src/bin/check-deps.ts`              |
+| Task                    | Command                                                        |
+| ----------------------- | -------------------------------------------------------------- |
+| Install                 | `bun install`                                                  |
+| Typecheck               | `bun run typecheck` (`tsc --noEmit`)                           |
+| Test (full suite)       | `bun test`                                                     |
+| Single test file        | `bun test tests/codec.test.ts`                                 |
+| Build to `dist/`        | `bun run build`                                                |
+| E2E verify vs SQL       | `bun tests/verify-end-to-end.ts`                               |
+| Install health probe    | `bun src/bin/check-deps.ts`                                    |
+| Build/refresh FTS index | `bun src/bin/fts-build.ts` (`--reset`, `--budget-ms N`)        |
+| Test against real DB    | `bun run test:live` (sets `OPENCODE_SESSIONS_EXPLORER_LIVE=1`) |
 
 CI runs in GitHub Actions: `.github/workflows/ci.yml` runs typecheck, build, the
 hermetic test suite, the end-to-end verify, and `pack:dry` on ubuntu + macos;
@@ -38,11 +40,63 @@ hermetic test suite, the end-to-end verify, and `pack:dry` on ubuntu + macos;
   compiled path, e.g. `import { stmt } from "../lib/db.js"` — even though the file is
   `db.ts`. Required by `tsc` (`moduleResolution: bundler`) and `bun build`. (Files under
   `tests/` import `src` with `.ts`; that is fine because bun runs them unbuilt.)
-- **Tests need a populated *live* DB and are NOT portable.** `tests/fixtures.json`
-  hardcodes real `ses_/msg_/prt_` IDs and `expected_counts` minimums (e.g.
-  `part_min: 240000`) from the author's machine. `bun test` runs against your real
-  `~/.local/share/opencode/opencode.db` and fails if it lacks those IDs/counts. No
-  hermetic fixture exists yet (roadmap). Do not treat fixture-ID failures as regressions.
+- **`bun test` is hermetic by default via the `bunfig.toml` `[test].preload` of
+  `tests/setup.ts`**, which runs against a synthetic fixture DB and deliberately
+  points `OPENCODE_SESSIONS_EXPLORER_CK_BIN` at a non-existent binary (so `ck`
+  paths are exercised as absent). `bun run test:live` opts into the real DB
+  (`OPENCODE_SESSIONS_EXPLORER_LIVE=1`); `tests/fixtures.json` hardcodes real
+  `ses_/msg_/prt_` IDs and `expected_counts` minimums from the author's machine
+  for that mode only. Do not treat live-mode fixture-ID failures as regressions
+  against the hermetic default.
+- **Never open the FTS sidecar (`lib/fts.ts`) with `readonly: true`.** A
+  `readonly: true` `bun:sqlite` connection throws `SQLITE_CANTOPEN` against a
+  WAL-mode database whose `-shm` file is absent (e.g. right after
+  `PRAGMA wal_checkpoint(TRUNCATE)`). A swallowed throw there previously
+  silently disabled the entire fast search tier with no diagnostic trace. The
+  sidecar is a file we exclusively own and write, so always open it read-write
+  through the module's single cached handle (`openFts`); never add a second,
+  read-only open path.
+- **Never add an `ESCAPE` clause (or `GLOB`) to the trigram `LIKE` in
+  `lib/fts.ts`.** Either one disables SQLite's trigram-index optimization for
+  the operator entirely, forcing a full content scan. Measured on the real
+  565k-doc / 5GB index: `EXPLAIN QUERY PLAN` shows
+  `SCAN docs_sub VIRTUAL TABLE INDEX 0:L6` at 7.5ms without it, vs a bare
+  `SCAN ... INDEX 0:` at 665ms with it — an 88x regression. Handle literal
+  `%`/`_` and `case_sensitive` correctness without escaping: leave them as
+  ordinary LIKE wildcards (a safe superset, never a subset) and drop false
+  positives with an exact `instr()` post-filter instead.
+- **`ck` must never be used for the `raw` channel/tree.** Measured 30-34s
+  timeouts returning zero rows over 328,069 files, vs 6.2s for ripgrep over the
+  same tree. `ck` is reserved for `sem`/`hybrid` only (see `lib/query-plan.ts`);
+  `rg` is the terminal fallback for everything else, including `raw`.
+- **A missing `rg` is a hard `RG_NOT_FOUND` throw when it's the primary
+  backend, not a silent `ck` fallback.** `requireRg()` in `lib/query-plan.ts`
+  throws `new SessionsError("RG_NOT_FOUND", ...)` rather than degrading —
+  `runWithEnvelope` catches it into `{ ok: false, error }` automatically. Do
+  not reintroduce a silent degrade-to-`ck` path: `ck` over the same tree
+  previously timed out and returned nothing, which is a worse failure mode
+  than a clear error.
+- **The trigram (`docs_sub`) table's case folding is ASCII-only** —
+  `FTS_CASE_FOLDING_ASCII_ONLY` in `lib/fts.ts` (`true`, surfaced via
+  `FtsStats.caseFoldingAsciiOnly`). It folds `A-Z`<->`a-z` but not accented or
+  non-Latin letters (verified: an indexed `ÄBC` matches `Äbc` but not `äbc`).
+  Do not describe the FTS literal tier as having "zero recall loss" or full
+  parity with ripgrep's Unicode-aware `-i` — it doesn't, by design.
+- **KNOWN GAP (worth checking before relying on it): `search-text.ts` calls
+  `ftsPresent(root)` for the planner's `ftsAvailable` input, not
+  `ftsUsable(root)`.** `lib/query-plan.ts`'s own doc comment says callers
+  MUST pass `ftsUsable()` semantics (index present AND complete), not mere
+  presence, because escalation only fires on zero hits — a present-but-partial
+  index would otherwise be trusted as authoritative and silently return a
+  truncated result set instead of falling back to `rg`. If you're touching
+  backend selection in `search-text.ts`, wire this to `ftsUsable()` and add a
+  regression test asserting a `--budget-ms`-partial index does not get chosen
+  as authoritative. Similarly, `search-text.ts`'s `makeRgRunner` currently
+  passes `fixedString: args.fixed_string` (the raw user arg) to `runRg`, not
+  `plan.treatAsFixedString` — so a `mode:"lex"` query that falls back to `rg`
+  (FTS unavailable/insufficient) is not yet guaranteed to be treated as a
+  fixed string there; pass `fixed_string:true` explicitly as a workaround
+  until this is wired through.
 - **`src/plugin.ts` must export only the Plugin function.** OpenCode's loader rejects
   with `Plugin export is not a function` if any non-function export sits beside it; the
   `default` and named exports are the same function by design. Do not add stray exports.
@@ -64,19 +118,41 @@ hermetic test suite, the end-to-end verify, and `pack:dry` on ubuntu + macos;
   `tool({…})` leaks zod internals. Do not enable it without adding explicit
   `: ToolDefinition` annotations per tool.
 
-## Architecture (4 layers)
+## Architecture (search is a 3-tier planner, not a single ck path)
 
 ```
 SQLite DB (read-only source of truth)
-  -> filesystem export tree (~/.local/share/opencode-sessions-explorer; by-session + by-channel)
-  -> ck index (.ck/, BM25 + embeddings; optional)
-  -> enriched response (re-fetches session/part metadata from SQLite per hit)
+  |-> FTS5 sidecar (fts-index.sqlite; trigram substring + unicode61 BM25)
+  |     reads DB directly, never the file tree -- fast tier for literal/lex
+  |-> filesystem export tree (~/.local/share/opencode-sessions-explorer; by-session + by-channel)
+  |     |-> ripgrep (rg)   -- exhaustive tier for real regex + fts fallback + raw channel
+  |     `-> ck (.ck/, BM25 + embeddings; optional) -- sem/hybrid ONLY
+  `-> enriched response (re-fetches session/part metadata from SQLite per hit)
 ```
 
-`search-text` and `grep-session` shell out to the optional **`ck` CLI**. If `ck` is
-absent they must return `CK_NOT_FOUND` cleanly — the other 16 tools work without it. The
-export tree is materialized by `bin/bulk-export.ts`; the plugin auto-syncs new parts
-before each search call.
+`src/lib/query-plan.ts` (pure, unit-tested, no I/O) picks the backend per query:
+`lex` mode is ALWAYS literal/text, never regex, regardless of metacharacters
+(the fix for `v1.2.3`/`C++`/`*` under `lex` no longer being silently
+reinterpreted as regexes); a literal query needs a usable 3+ character
+contiguous run (`hasUsableTrigram()`) before `fts` is even a candidate — below
+that floor it routes straight to `rg` (`fts` would otherwise degrade to an
+unbounded content scan; measured 12.2s for a 2-char query). Given a usable
+trigram run, literal + FTS index covers the requested channels -> `fts`
+(fallback `["rg"]` on zero hits); otherwise -> `rg`. A real regex -> always
+`rg`. `sem`/`hybrid` -> `ck` always. `ck` is NEVER a fallback for literal/regex
+— `rg` and `ck` read the same file tree, so escalating to `ck` after a
+zero-hit `rg` pass adds latency with no additional recall. When `rg` is
+required as the primary backend and unavailable, `planSearch()` throws
+`RG_NOT_FOUND` (a `SessionsError`) instead of falling back to `ck` — see the
+RG_NOT_FOUND gotcha below. `search-text` shells out to `rg` and, for
+`sem`/`hybrid` only, the optional **`ck` CLI**; `grep-session` shells out to
+`rg` only and no longer depends on `ck` at all. If `ck` is absent, only
+`sem`/`hybrid` `search-text` calls return `CK_NOT_FOUND` — every other search
+path works without it. The export tree is materialized by
+`bin/bulk-export.ts`; the FTS sidecar is materialized by `bin/fts-build.ts`.
+`search-text` delta-syncs whichever backend it is about to run: the `fts`
+backend syncs only the sidecar (straight from SQLite, skipping the file tree
+entirely), while `rg`/`ck` sync the file-tree export.
 
 ## Adding or editing a tool
 
@@ -88,7 +164,8 @@ before each search call.
   schema-drift detection, and sizes the payload against `capKb`.
 - Raise recoverable errors via `fail(code, msg, hint)` or
   `throw new SessionsError(code, msg, hint)` using a code from `lib/errors.ts`
-  (`NOT_FOUND`, `BAD_ARGS`, `CK_NOT_FOUND`, …). Do not invent ad-hoc error shapes.
+  (`NOT_FOUND`, `BAD_ARGS`, `CK_NOT_FOUND`, `RG_NOT_FOUND`, `RG_FAILED`, …). Do not
+  invent ad-hoc error shapes.
 - Query the DB through `stmt(sql).all/get(...)` (`lib/db.js`) — cached prepared
   statements; use `json_extract(...)` for the JSON `data` columns on `message`/`part`.
 - **List-shaped results must be wrapped in `table(records, { dict: [...] })`**
@@ -100,6 +177,9 @@ before each search call.
 ## Env overrides (useful for tests / non-default paths)
 
 `OPENCODE_SESSIONS_EXPLORER_DB`, `OPENCODE_SESSIONS_EXPLORER_EXPORT_ROOT`,
-`OPENCODE_SESSIONS_EXPLORER_TOOL_OUTPUT_DIR`, `OPENCODE_SESSIONS_EXPLORER_CK_BIN`.
+`OPENCODE_SESSIONS_EXPLORER_TOOL_OUTPUT_DIR`, `OPENCODE_SESSIONS_EXPLORER_CK_BIN`,
+`OPENCODE_SESSIONS_EXPLORER_RG_BIN`, `OPENCODE_SESSIONS_EXPLORER_FTS_DB`,
+`OPENCODE_SESSIONS_EXPLORER_FTS_CHANNELS`,
+`OPENCODE_SESSIONS_EXPLORER_FTS_SUBSTRING_CHANNELS`.
 `get-part` dereference is path-guarded to the tool-output whitelist (`lib/path-guard.ts`);
 search snippets redact secrets by default (pass `redact:false` for local forensics only).

@@ -75,9 +75,18 @@ describe("ck helper freshness and coverage", () => {
       mkdirSync(join(root, "by-session", F.sessions.archived), { recursive: true })
       process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN = writeFakeCk(tempRoot(), { sleepSeconds: "1.2" })
 
+      // Force the ck backend deterministically via mode:"sem": the planner always
+      // routes sem/hybrid to ck regardless of fts/rg availability (see
+      // query-plan.test.ts), whereas a plain literal/regex forensic search is now
+      // served by ripgrep (rg over the raw tree is bounded and exhaustive; ck
+      // cannot search the 300k+-file raw tree within a sane timeout). This still
+      // exercises the exact behavior under test: when ck fans out across multiple
+      // scopes and the per-scope timeout is exceeded, the run reports partial
+      // scope coverage. The fake ck sleeps 1.2s > the 1000ms budget, so the first
+      // scope times out and the second is left unsearched -> truncated coverage.
       const env = await runTool(searchText, {
         q: "review",
-        mode: "regex",
+        mode: "sem",
         surface: "forensics",
         session_ids: [F.sessions.active, F.sessions.archived],
         limit: 3,
@@ -96,9 +105,14 @@ describe("ck helper freshness and coverage", () => {
       const sessionId = F.sessions.big_part
       process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN = writeFakeCk(tempRoot(), {})
 
+      // Force the ck backend via mode:"sem" (planner always routes sem/hybrid to
+      // ck; a plain literal forensic search now goes to rg). The subject under test
+      // is backend-agnostic: whichever file-tree engine runs, the export delta-sync
+      // must materialize the session's by-session dir BEFORE scopes are resolved,
+      // and coverage must report the single requested scope.
       const env = await runTool(searchText, {
         q: "big patch",
-        mode: "regex",
+        mode: "sem",
         surface: "forensics",
         session_ids: [sessionId],
         limit: 3,

@@ -247,6 +247,25 @@ export function buildFixtureDb(dbPath: string): void {
       text: "Considering the PR review feedback before applying changes.",
     })
 
+    // Archived session content — seeded with real message/part rows so its export
+    // tree is non-empty and grep_session/search_text can find it (rehearsal GR-A /
+    // TX-A). Without these rows the archived session's by-session export dir would
+    // be empty and grep_session would (correctly) return INDEX_MISSING. The bodies
+    // deliberately contain the words "regex" and "review" that those probes search.
+    const TA = T + 11 * 3_600_000
+    addMessage("msg_fix_arch_u1", FIXTURES.sessions.archived, TA + 10, "user")
+    addPart("prt_fix_arch_text1", "msg_fix_arch_u1", FIXTURES.sessions.archived, TA + 11, {
+      type: "text",
+      text: "Old archived review session: please double-check the regex handling before we submit the PR review.",
+    })
+    addMessage("msg_fix_arch_a1", FIXTURES.sessions.archived, TA + 20, "assistant")
+    addPart("prt_fix_arch_tool1", "msg_fix_arch_a1", FIXTURES.sessions.archived, TA + 21, {
+      type: "tool",
+      tool: "bash",
+      callID: "call_fix_arch",
+      state: { status: "completed", input: { command: "grep -R regex ." }, output: "matched regex in review notes", time: { start: TA + 21, end: TA + 23 } },
+    })
+
     // active002 — externalized-output tool part + a second error (for failure grouping).
     const T2 = T + 2 * 3_600_000
     addMessage("msg_fix_a002_a1", "ses_fix_active002", T2 + 20, "assistant")
@@ -297,9 +316,17 @@ export function buildFixtureDb(dbPath: string): void {
         files: [`src/gen/file_${i}.ts`],
       })
     }
-    // Oversized-by-count patch part: >200 files triggers get-part files truncation,
-    // and the raw JSON is several KB (retargeted byte assertion in rehearsal).
-    const bigFiles = Array.from({ length: 260 }, (_, i) => `src/module/generated/file_${String(i).padStart(4, "0")}.ts`)
+    // Oversized patch part (~5 MB of generated file paths). Serves two rehearsal
+    // probes at once:
+    //   - GP-L: get-part must cap it. >200 files triggers the files[] by-count
+    //     truncation AND the raw JSON body is >5 MB so original_bytes > 1 MB proves
+    //     a genuine large-blob truncation (not just a few-KB one).
+    //   - GS-L: get-session on the owning "huge" session must stay counts-only
+    //     (<16 KB) despite a 5 MB part living inside it.
+    // Generated (not a committed blob) so the on-disk fixture source stays tiny; the
+    // ~5 MB only ever materializes in the throwaway temp SQLite built at test time.
+    // ~140k paths * ~37 bytes/entry in JSON ≈ 5.1 MB.
+    const bigFiles = Array.from({ length: 140_000 }, (_, i) => `src/module/generated/file_${String(i).padStart(6, "0")}.ts`)
     addPart(FIXTURES.parts.big_5mb_patch, "msg_fix_bigpart_patch", FIXTURES.sessions.big_part, TB + 1000, {
       type: "patch",
       hash: "hbigpatch",

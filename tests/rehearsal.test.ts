@@ -11,7 +11,7 @@
  * `test.skipIf(!LIVE)` / `describe.skipIf(!LIVE)`. Run `bun run test:live`
  * (OPENCODE_SESSIONS_EXPLORER_LIVE=1) to exercise everything against the live DB.
  */
-import { test, describe, expect } from "bun:test"
+import { test, describe, expect, beforeAll, afterAll, afterEach } from "bun:test"
 import { runTool, runToolRaw, loadFixtures } from "./helpers.ts"
 import { isTable, decodeTable } from "../src/lib/table.ts"
 
@@ -297,14 +297,15 @@ describe("get_part", () => {
     expect(r.ok).toBe(false)
     expect(r.error?.code).toBe("NOT_FOUND")
   })
-  test("GP-L big patch — capped (by-count + by-bytes)", async () => {
+  test("GP-L big 5 MB patch — capped (by-count + by-bytes)", async () => {
     const r = await runTool(getPart, { part_id: F.parts.big_5mb_patch, max_bytes: 4096 })
     expect(r.ok).toBe(true)
     expect(r.data.truncated).toBe(true)
     expect(r.data.truncated_fields.some((f: string) => f.startsWith("files"))).toBe(true)
-    // Fixture's patch JSON is several KB (>200 files); live corpus has multi-MB
-    // blobs. Assert the body exceeded max_bytes (so it was genuinely truncated).
-    expect(r.data.original_bytes).toBeGreaterThan(4096)
+    // The fixture seeds a genuine ~5 MB patch part (build-fixture.ts) so this holds
+    // hermetically too — the raw JSON body is multi-MB, proving a large-blob
+    // truncation rather than a few-KB one. The live corpus is only larger.
+    expect(r.data.original_bytes).toBeGreaterThan(1024 * 1024)
     expect(r.meta.bytes_returned).toBeLessThan(128 * 1024)
   })
   test("GP-PATH dereference path-traversal rejection", async () => {
@@ -535,8 +536,11 @@ describe("cost_by_period", () => {
 
 // --- grep_session ---
 import { grepSession } from "../src/tools/grep-session.ts"
-// ck-backed + requires a populated export tree → live corpus only.
-describe.skipIf(!LIVE)("grep_session", () => {
+// grep_session is now ripgrep-backed (no ck) and auto-syncs the filesystem export
+// before searching, so it runs HERMETICALLY against the synthetic fixture tree —
+// no live corpus required. The archived session is seeded with real message/part
+// rows (build-fixture.ts) so GR-A is greppable rather than INDEX_MISSING.
+describe("grep_session", () => {
   test("GR-H known phrase in active session", async () => {
     const r = await runTool(grepSession, { session_id: F.sessions.active, pattern: F.phrases.active_known, limit: 10 })
     expect(r.ok).toBe(true)
@@ -577,7 +581,14 @@ describe.skipIf(!LIVE)("grep_session", () => {
 
 // --- search_text ---
 import { searchText } from "../src/tools/search-text.ts"
-// ck-backed + requires a populated export tree → live corpus only.
+// Extra helpers used by the staged-recall (live) and backend-routing (hermetic)
+// blocks below. Aliased to avoid clashing with the L2-reindex section's own
+// export/fs imports further down.
+import { channelExportComplete as channelExportCompleteRaw, exportRoot as exportRootRaw } from "../src/lib/export.ts"
+import { existsSync as existsSyncRaw, renameSync as renameSyncRaw } from "node:fs"
+import { join as joinRaw } from "node:path"
+// The original upstream search_text probes below are ck-backed integration tests
+// over the author's real corpus → live corpus only.
 describe.skipIf(!LIVE)("search_text", () => {
   test("TX-H scoped regex happy", async () => {
     const r = await runTool(searchText, { q: F.phrases.active_known, session_ids: [F.sessions.active], limit: 5 })
@@ -632,12 +643,381 @@ describe.skipIf(!LIVE)("search_text", () => {
   }, 40000)
 })
 
+// --- search_text: staged-recall + semantic probes (live corpus only) ---
+// These exercise the unscoped staged-recall gate and ck-backed sem routing, which
+// depend on the author's large multi-thousand-session corpus (distinct-session
+// coverage counts, curated-channel completeness) and a real/embedding-capable ck
+// binary. On the 16-session hermetic fixture, and with CK_BIN pointed at a
+// non-existent path by tests/setup.ts, these cannot be meaningful — so they are
+// gated to LIVE. The hermetic backend-routing coverage lives in the next block.
+describe.skipIf(!LIVE)("search_text — staged recall + sem (live)", () => {
+  test("TX-SR1 sufficient distinct-session coverage in session-summary → exactly session-summary-only", async () => {
+    const r = await runTool(searchText, { q: F.phrases.active_known, mode: "regex", limit: 1, timeout_ms: 15000 })
+    expect(r.ok).toBe(true)
+    if (r.data.backend === "fts") {
+      // The fts backend bypasses staged recall entirely — a single indexed query.
+      expect(r.data.recall_strategy).toBe("fts")
+    } else {
+      expect(r.data.recall_strategy).toBe("session-summary-only")
+    }
+    expect(r.data.ck_duration_ms).toBeLessThan(5000)
+  }, 20000)
+  test("TX-SR2 insufficient distinct-session coverage for the requested limit must NOT early-return summary-only", async () => {
+    const r = await runTool(searchText, { q: F.phrases.active_known, mode: "regex", limit: 50, timeout_ms: 20000 })
+    expect(r.ok).toBe(true)
+    if (r.data.backend === "fts") {
+      expect(r.data.recall_strategy).toBe("fts")
+    } else {
+      expect(r.data.recall_strategy).not.toBe("session-summary-only")
+      expect(["session-summary-then-conversation", "session-summary-partial-no-budget"]).toContain(r.data.recall_strategy)
+    }
+  }, 30000)
+  test("TX-SR3 staged total wall time respects timeout_ms — no floor overshoot", async () => {
+    const timeoutMs = 1200
+    const r = await runTool(searchText, { q: "__nothingmatcheszzz__", mode: "regex", limit: 5, timeout_ms: timeoutMs })
+    expect(r.ok).toBe(true)
+    expect(r.data.recall_strategy).not.toBe("session-summary-only")
+    expect(r.data.search_duration_ms).toBeLessThanOrEqual(timeoutMs + 500)
+    expect(r.data.ck_duration_ms).toBeLessThanOrEqual(timeoutMs + 400)
+  }, 15000)
+  test("TX-SR4 scoped session_ids search bypasses staged recall (direct or fts)", async () => {
+    const r = await runTool(searchText, { q: F.phrases.active_known, session_ids: [F.sessions.active], limit: 5 })
+    expect(r.ok).toBe(true)
+    expect(r.data.recall_strategy).toBe(r.data.backend === "fts" ? "fts" : "direct")
+  }, 30000)
+  test("TX-SR5 explicit channels override bypasses staged recall (direct or fts)", async () => {
+    const r = await runTool(searchText, { q: "Submit", mode: "regex", channels: ["conversation"], limit: 3, timeout_ms: 15000 })
+    expect(r.ok).toBe(true)
+    expect(r.data.recall_strategy).toBe(r.data.backend === "fts" ? "fts" : "direct")
+  }, 20000)
+  test("TX-SR6 role=user bypasses staged recall (direct or fts)", async () => {
+    const r = await runTool(searchText, { q: "Submit", mode: "regex", role: "user", limit: 3, timeout_ms: 15000 })
+    expect(r.ok).toBe(true)
+    expect(r.data.recall_strategy).toBe(r.data.backend === "fts" ? "fts" : "direct")
+  }, 20000)
+  test("TX-SR7 forensics surface bypasses staged recall (direct strategy)", async () => {
+    const r = await runTool(searchText, { q: "Submit", mode: "regex", surface: "forensics", limit: 3, timeout_ms: 15000 })
+    expect(r.ok).toBe(true)
+    expect(r.data.recall_strategy).toBe("direct")
+  }, 20000)
+  test("TX-SR8 partial curated export: session-summary is a cheap first pass but never early-returns summary-only", async () => {
+    const root = exportRootRaw()
+    const markerPath = joinRaw(root, ".channels_v1_complete")
+    const backupPath = markerPath + ".rehearsal-backup"
+    const hadMarker = existsSyncRaw(markerPath)
+    if (hadMarker) renameSyncRaw(markerPath, backupPath)
+    try {
+      expect(channelExportCompleteRaw(root)).toBe(false)
+      const r = await runTool(searchText, { q: F.phrases.active_known, mode: "regex", limit: 1, timeout_ms: 15000 })
+      expect(r.ok).toBe(true)
+      if (r.data.backend === "fts") {
+        expect(r.data.recall_strategy).toBe("fts")
+      } else {
+        expect(r.data.recall_strategy).not.toBe("session-summary-only")
+        expect(["session-summary-then-conversation", "session-summary-partial-no-budget"]).toContain(r.data.recall_strategy)
+      }
+    } finally {
+      if (hadMarker) renameSyncRaw(backupPath, markerPath)
+    }
+    expect(channelExportCompleteRaw(root)).toBe(hadMarker)
+  }, 30000)
+  test("TX-SEM2 sem mode routes to ck, or cleanly downgrades to a literal backend", async () => {
+    const r = await runTool(searchText, { q: F.phrases.active_known, mode: "sem", session_ids: [F.sessions.active], limit: 3 })
+    expect(r.ok).toBe(true)
+    const warns = (r.warnings ?? []).join(" ")
+    const downgraded = r.meta.mode === "fallback-regex" || warns.includes("falling back to regex")
+    if (downgraded) {
+      expect(["fts", "rg", "ck"]).toContain(r.data.backend)
+    } else {
+      expect(r.data.backends_tried[0]).toBe("ck")
+      expect(r.data.backend).toBe("ck")
+    }
+  }, 30000)
+})
+
+// --- search_text: backend routing (planner) probes — HERMETIC ---
+// The new search planner (src/lib/query-plan.ts) routes literal queries to the
+// SQLite FTS sidecar (src/lib/fts.ts), real regexes to ripgrep, and sem/hybrid to
+// ck. To exercise the fts tier deterministically we build a small FTS index from
+// the fixture DB in beforeAll (SQLite-derived docs → session_id/part_id come from
+// columns, never path parsing, so hits are clean). The sidecar lives inside the
+// temp export root; afterAll removes it so later blocks see fts as absent. Gated to
+// hermetic (skipIf(LIVE)) so it NEVER touches the author's real 566k-doc index.
+import { syncFts, ftsPresent, ftsDbPath, _closeFtsForTest } from "../src/lib/fts.ts"
+import { rmSync as rmSyncRaw } from "node:fs"
+describe.skipIf(LIVE)("search_text — backend routing (hermetic)", () => {
+  beforeAll(async () => {
+    if (LIVE) return // never build/refresh the real fts index in live mode
+    await syncFts({}) // full (unbudgeted) build from the fixture DB
+    expect(ftsPresent(exportRootRaw())).toBe(true)
+  })
+  afterAll(() => {
+    if (LIVE) return
+    _closeFtsForTest()
+    // Remove only OUR temp sidecar (never the real index — guarded by skipIf(LIVE)).
+    const p = ftsDbPath(exportRootRaw())
+    for (const suffix of ["", "-wal", "-shm"]) {
+      try { rmSyncRaw(p + suffix) } catch { /* ignore */ }
+    }
+  })
+
+  test("TX-BK1 scoped literal search returns correct hits + stable wire shape", async () => {
+    const raw = await runToolRaw(searchText, { q: F.phrases.active_known, session_ids: [F.sessions.active], limit: 5 })
+    expect(raw.ok).toBe(true)
+    // hits stay a columnar table on the wire regardless of which backend produced them
+    expect(isTable(raw.data.hits)).toBe(true)
+    const hits = decodeTable(raw.data.hits)
+    expect(hits.length).toBeGreaterThan(0)
+    for (const h of hits) {
+      expect(h.session_id).toBe(F.sessions.active)
+      if (h.part_id) expect(h.part_id).toMatch(/^prt_/)
+    }
+  }, 30000)
+  test("TX-BK2 backend + backends_tried present and consistent with plan_reason", async () => {
+    const r = await runTool(searchText, { q: F.phrases.active_known, session_ids: [F.sessions.active], limit: 5 })
+    expect(r.ok).toBe(true)
+    expect(["fts", "rg", "ck"]).toContain(r.data.backend)
+    expect(Array.isArray(r.data.backends_tried)).toBe(true)
+    expect(r.data.backends_tried.length).toBeGreaterThanOrEqual(1)
+    // the reported backend is the last one actually tried in the chain
+    expect(r.data.backends_tried[r.data.backends_tried.length - 1]).toBe(r.data.backend)
+    // no backend appears twice in the escalation chain
+    expect(new Set(r.data.backends_tried).size).toBe(r.data.backends_tried.length)
+    expect(typeof r.data.plan_reason).toBe("string")
+    expect(r.data.plan_reason.length).toBeGreaterThan(0)
+    expect(r.data.literal).toBe(true) // no regex metacharacters in the phrase
+    expect(typeof r.data.search_duration_ms).toBe("number")
+    // with the fts index built, a scoped literal must be served by fts as primary
+    expect(r.data.backends_tried[0]).toBe("fts")
+    expect(r.data.plan_reason).toContain("fts")
+  }, 30000)
+  test("TX-RG1 a true regex pattern (.*) is never served by the fts backend", async () => {
+    const r = await runTool(searchText, { q: "Submit.*review", session_ids: [F.sessions.active], limit: 5 })
+    expect(r.ok).toBe(true)
+    expect(r.data.literal).toBe(false)
+    expect(r.data.backend).not.toBe("fts")
+    expect(r.data.backends_tried).not.toContain("fts")
+  }, 30000)
+  test("TX-ESC1 zero-result query escalates through fallbacks without exceeding timeout_ms", async () => {
+    const timeoutMs = 4000
+    const r = await runTool(searchText, { q: "__zzz_no_such_phrase_zzz__", session_ids: [F.sessions.active], limit: 3, timeout_ms: timeoutMs })
+    expect(r.ok).toBe(true)
+    expect(r.data.hits).toEqual([])
+    // the whole chain (primary + any escalations) stays within the caller's budget
+    expect(r.data.search_duration_ms).toBeLessThanOrEqual(timeoutMs + 500)
+    // fts (primary) found nothing → escalates to rg; order is primary-first, no dupes
+    const bt = r.data.backends_tried
+    expect(bt.length).toBeGreaterThanOrEqual(1)
+    expect(bt[0]).toBe("fts")
+    expect(new Set(bt).size).toBe(bt.length)
+  }, 20000)
+  test("TX-UB1 role=user filter keeps only user-authored hits", async () => {
+    const r = await runTool(searchText, { q: F.phrases.active_known, session_ids: [F.sessions.active], role: "user", limit: 10 })
+    expect(r.ok).toBe(true)
+    expect(r.data.role_filter).toBe("user")
+    for (const h of r.data.hits) expect(h.role).toBe("user")
+  }, 30000)
+  test("TX-UB2 group_by_session shape (evidence/why/hit_count_by_channel)", async () => {
+    const r = await runTool(searchText, { q: F.phrases.active_known, group_by_session: true, session_ids: [F.sessions.active], limit: 5 })
+    expect(r.ok).toBe(true)
+    expect(Array.isArray(r.data.sessions)).toBe(true)
+    expect(r.data.hits).toBeUndefined()
+    if (r.data.sessions.length > 0) {
+      const s = r.data.sessions[0]
+      expect(typeof s.hit_count).toBe("number")
+      expect(s.hit_count_by_channel).toBeDefined()
+      expect(Array.isArray(s.evidence)).toBe(true)
+      expect(typeof s.why).toBe("string")
+    }
+  }, 30000)
+  test("TX-UB3 forensics/raw surface never uses the fts backend", async () => {
+    const r = await runTool(searchText, { q: F.phrases.active_known, surface: "forensics", session_ids: [F.sessions.active], limit: 3 })
+    expect(r.ok).toBe(true)
+    expect(r.data.channels).toContain("raw")
+    expect(r.data.backend).not.toBe("fts")
+    expect(r.data.backends_tried).not.toContain("fts")
+  }, 30000)
+})
+
+// --- search_text: audit-defect regressions (hermetic) ---
+// Falsifiable coverage for the blocking audit defects: (A) timeout_ms bounds the
+// WHOLE chain, (B) partial results are visible, (C) sem/hybrid over the unbounded
+// raw tree is refused, (D) role filtering after topk is visible, (E) the 5000-scope
+// cap is reported, plus the sidecar contracts: ftsUsable gating, the partial-index
+// health warning, and treatAsFixedString reaching ripgrep for a lex query full of
+// regex metacharacters. Its own dedicated sidecar (a separate FTS_DB env) is built
+// complete in beforeAll; individual tests toggle completeness and restore it in
+// afterEach. skipIf(LIVE) so it NEVER touches the author's real index.
+import { ftsUsable as ftsUsableRaw, _setCompleteForTest } from "../src/lib/fts.ts"
+describe.skipIf(LIVE)("search_text — audit-defect regressions (hermetic)", () => {
+  const FTS_DB = joinRaw(exportRootRaw(), "audit-defect-fts.sqlite")
+  const SLOP_MS = 1500 // generous CI slop; the point is "no gross overshoot/hang"
+  beforeAll(async () => {
+    if (LIVE) return
+    _closeFtsForTest()
+    process.env.OPENCODE_SESSIONS_EXPLORER_FTS_DB = FTS_DB
+    await syncFts({}) // full build from the fixture DB → authoritative/usable
+    _setCompleteForTest(true)
+    expect(ftsUsableRaw()).toBe(true)
+  })
+  afterEach(() => {
+    if (LIVE) return
+    // Most tests want a complete/usable index; restore it after any that flipped it.
+    _setCompleteForTest(true)
+  })
+  afterAll(() => {
+    if (LIVE) return
+    _closeFtsForTest()
+    delete process.env.OPENCODE_SESSIONS_EXPLORER_FTS_DB
+    for (const suffix of ["", "-wal", "-shm"]) { try { rmSyncRaw(FTS_DB + suffix) } catch { /* ignore */ } }
+  })
+
+  // ---- DEFECT A: timeout_ms bounds the whole chain (fts / rg / fts→rg) ----
+  // Measure ACTUAL tool wall-clock (not the self-reported search_duration_ms, which
+  // used to exclude the post-search ck probe — DEFECT 2). `timed()` wraps runTool.
+  const timed = async (args: Record<string, any>) => {
+    const t0 = Date.now()
+    const r = await runTool(searchText, args)
+    return { r, wallMs: Date.now() - t0 }
+  }
+  test("DA-1 fts path respects timeout_ms in ACTUAL wall time", async () => {
+    const timeoutMs = 1000
+    const { r, wallMs } = await timed({ q: F.phrases.active_known, session_ids: [F.sessions.active], limit: 5, timeout_ms: timeoutMs })
+    expect(r.ok).toBe(true)
+    expect(r.data.backend).toBe("fts")
+    expect(wallMs).toBeLessThanOrEqual(timeoutMs + SLOP_MS)
+    expect(r.data.search_duration_ms).toBeLessThanOrEqual(timeoutMs + SLOP_MS)
+    expect(r.data.partial).toBe(false)
+    expect(r.data.scope_truncated).toBe(false)
+  }, 20000)
+  test("DA-2 rg (regex) path respects timeout_ms in ACTUAL wall time", async () => {
+    const timeoutMs = 1000
+    const { r, wallMs } = await timed({ q: "Submit.*review", session_ids: [F.sessions.active], limit: 5, timeout_ms: timeoutMs })
+    expect(r.ok).toBe(true)
+    expect(r.data.backend).toBe("rg")
+    expect(r.data.literal).toBe(false)
+    expect(wallMs).toBeLessThanOrEqual(timeoutMs + SLOP_MS)
+  }, 20000)
+  test("DA-3 fts→rg escalation stays within timeout_ms (ACTUAL wall time) and tries both", async () => {
+    const timeoutMs = 1000
+    const { r, wallMs } = await timed({ q: "__zzz_no_such_phrase_zzz__", session_ids: [F.sessions.active], limit: 3, timeout_ms: timeoutMs })
+    expect(r.ok).toBe(true)
+    expect(r.data.hits).toEqual([])
+    expect(r.data.backends_tried[0]).toBe("fts")
+    expect(r.data.backends_tried).toContain("rg")
+    expect(wallMs).toBeLessThanOrEqual(timeoutMs + SLOP_MS)
+    expect(r.data.search_duration_ms).toBeLessThanOrEqual(timeoutMs + SLOP_MS)
+  }, 20000)
+  test("DA-4 ck (sem) path respects timeout_ms in ACTUAL wall time INCLUDING the freshness probes", async () => {
+    // Scoped sem → ck (bounded, allowed). ck is absent in the hermetic harness so
+    // it fails fast; the point is that the pre- AND post-search ck freshness probes
+    // are budget-bounded (DEFECT 2) and cannot push real wall time past timeout_ms.
+    const timeoutMs = 1000
+    const { r, wallMs } = await timed({ q: "review feedback", mode: "sem", session_ids: [F.sessions.active], limit: 3, timeout_ms: timeoutMs })
+    // ok may be false (CK_NOT_FOUND) in the hermetic harness — we assert the BOUND.
+    expect(wallMs).toBeLessThanOrEqual(timeoutMs + SLOP_MS)
+    if (!r.ok) expect(r.error.code).not.toBe("BAD_ARGS") // scoped → guard must NOT fire
+  }, 20000)
+
+  // ---- DEFECT C: sem/hybrid over the unbounded raw tree is refused ----
+  test("DC-1 sem + forensics + UNSCOPED is refused with an actionable error", async () => {
+    const r = await runTool(searchText, { q: "anything at all", mode: "sem", surface: "forensics", limit: 3 })
+    expect(r.ok).toBe(false)
+    expect(r.error.code).toBe("BAD_ARGS")
+    expect(`${r.error.message} ${r.error.hint ?? ""}`.toLowerCase()).toMatch(/scope|curated/)
+  }, 20000)
+  test("DC-2 hybrid + channels:[raw] + UNSCOPED is refused", async () => {
+    const r = await runTool(searchText, { q: "anything at all", mode: "hybrid", channels: ["raw"], limit: 3 })
+    expect(r.ok).toBe(false)
+    expect(r.error.code).toBe("BAD_ARGS")
+  }, 20000)
+  test("DC-3 sem + forensics + SCOPED is NOT refused by the guard (bounded path allowed)", async () => {
+    // Scoped sem over raw is bounded to the named session → the guard must NOT fire.
+    // With ck absent in the hermetic env it surfaces CK_NOT_FOUND, never BAD_ARGS.
+    const r = await runTool(searchText, { q: "anything", mode: "sem", surface: "forensics", session_ids: [F.sessions.active], limit: 3 })
+    if (!r.ok) expect(r.error.code).not.toBe("BAD_ARGS")
+  }, 20000)
+  test("DC-4 (DEFECT 1 sideways route) unscoped sem with CURATED channels that resolves to the raw tree is refused", async () => {
+    // The execute() guard only sees requested channels (curated here, NOT raw), so it
+    // passes. But with the curated-export marker absent, resolveCkScopes() falls back
+    // to the raw by-session tree for an UNSCOPED query → the resolved-scope guard must
+    // refuse it (the exact ck-over-raw pathology reached sideways). The partial-export
+    // warning must still be surfaced so the user knows the curated export is incomplete.
+    const root = exportRootRaw()
+    const marker = joinRaw(root, ".channels_v1_complete")
+    const backup = marker + ".dc4backup"
+    const had = existsSyncRaw(marker)
+    if (had) renameSyncRaw(marker, backup)
+    try {
+      const r = await runTool(searchText, { q: "review feedback", mode: "sem", limit: 5, timeout_ms: 5000 })
+      expect(r.ok).toBe(false)
+      expect(r.error.code).toBe("BAD_ARGS")
+      expect(`${r.error.message} ${r.error.hint ?? ""}`.toLowerCase()).toMatch(/raw|bulk-export|regex/)
+      // partial-export warning preserved (user still needs to know curated is incomplete)
+      expect((r.warnings ?? []).join(" ").toLowerCase()).toContain("curated channel export")
+    } finally {
+      if (had) renameSyncRaw(backup, marker)
+    }
+  }, 20000)
+
+  // ---- DEFECT D: role filter applied after topk is made visible ----
+  test("DD-1 role filter after a file-tree topk cut is surfaced (warning + signal + partial)", async () => {
+    // Regex over the raw tree of every 'global' session → rg returns a full
+    // candidate window; the role filter is applied AFTER that cut, so the result
+    // may be missing user hits. That truncation must be VISIBLE, never silent.
+    const r = await runTool(searchText, { q: ".", surface: "forensics", project_id: "global", role: "user", limit: 1 })
+    expect(r.ok).toBe(true)
+    expect(r.data.backend).not.toBe("fts") // fts applies role in SQL; this must be a file-tree engine
+    expect(r.data.role_filter_truncated).toBe(true)
+    expect(r.data.partial).toBe(true)
+    expect((r.warnings ?? []).join(" ")).toContain("role=")
+  }, 20000)
+
+  // ---- DEFECT E: 5000-scope cap is reported (signal wired; false for small scopes) ----
+  test("DE-1 scope_truncated signal is present and false for a small metadata scope", async () => {
+    const r = await runTool(searchText, { q: F.phrases.active_known, project_id: "global", limit: 5 })
+    expect(r.ok).toBe(true)
+    expect(typeof r.data.scope_truncated).toBe("boolean")
+    expect(r.data.scope_truncated).toBe(false) // fixture has far fewer than 5000 sessions
+  }, 20000)
+
+  // ---- Sibling contract: treatAsFixedString reaches ripgrep for a lex query ----
+  test("TFS-1 lex query with regex metacharacters is matched literally by rg, not evaluated as a regex", async () => {
+    _setCompleteForTest(false) // make fts unusable so lex falls back to ripgrep
+    // `a{2,1}` is a perfectly good LITERAL search token but an INVALID regex
+    // (repetition range start > end). ripgrep run as a regex rejects it with a
+    // parse error (rc=2), which the tool surfaces as an "rc=2" warning; run as a
+    // fixed string (-F) it is a normal, error-free search. This is exactly the
+    // `C++`/`v1.2.3` class of "metacharacters but not a regex" lex queries the
+    // treatAsFixedString contract exists to protect — chosen invalid so the
+    // regex-vs-literal difference is corpus-independent and falsifiable.
+    const r = await runTool(searchText, { q: "a{2,1}", mode: "lex", session_ids: [F.sessions.active], limit: 5 })
+    expect(r.ok).toBe(true)
+    expect(r.data.backend).toBe("rg")
+    expect(r.data.plan_reason.toLowerCase()).toContain("fixed-string")
+    // If treatAsFixedString were NOT passed, ripgrep would try to compile the
+    // query as a regex, fail to parse it, and exit rc=2 → an "rc=2" warning.
+    expect((r.warnings ?? []).join(" ")).not.toContain("rc=2")
+  }, 20000)
+
+  // ---- Index health: partial index warns and names the build command ----
+  test("HEALTH-1 a present-but-incomplete index warns (naming fts-build) and serves literal via rg", async () => {
+    _setCompleteForTest(false) // present but not authoritative
+    const r = await runTool(searchText, { q: F.phrases.active_known, session_ids: [F.sessions.active], limit: 5 })
+    expect(r.ok).toBe(true)
+    expect(r.data.backend).toBe("rg") // ftsUsable() false → literal escalates to rg
+    expect((r.warnings ?? []).join(" ")).toContain("opencode-sessions-explorer-fts-build")
+  }, 20000)
+})
+
 // --- Phase 5 reindex probes — Layer-2 (filesystem export) update propagation ---
 import { runExport, getSyncState, _resetExportCacheForTest, exportRoot } from "../src/lib/export.ts"
 import { readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs"
 import { join } from "node:path"
-// Export-propagation over a fully materialized tree → live corpus only.
-describe.skipIf(!LIVE)("L2 reindex (export update propagation)", () => {
+// Export-propagation runs HERMETICALLY: the earlier grep_session / search_text
+// blocks materialize the fixture export tree, and getSyncState()/runExport() work
+// against it directly. Assertions target upstream's v3 SyncState (export-state.ts).
+describe("L2 reindex (export update propagation)", () => {
   test("RX-H .last_sync uses v3 schema (id + session cursor state)", () => {
     const root = exportRoot()
     const p = join(root, ".last_sync")

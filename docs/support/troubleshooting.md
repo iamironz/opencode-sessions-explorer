@@ -18,15 +18,17 @@ Two commands cover the health of every layer the plugin depends on.
    ```
 
    This reports database reachability, schema head and drift, SQLite `json1`,
-   `busy_timeout`, export tree presence, curated channel views, `ck` CLI, `ck`
-   index, and the tool-output directory. Add `--json` for machine-readable output.
+   `busy_timeout`, export tree presence, curated channel views, the ripgrep
+   binary + version, FTS5 sidecar health (present, doc count, bytes, indexed
+   channels, cursor, last error), `ck` CLI, `ck` index, and the tool-output
+   directory. Add `--json` for machine-readable output.
 
 2. Probe the database from inside OpenCode with the `db-stats` tool. It returns the
-   migration head, table counts, json1 status, `busy_timeout`, and any schema-drift
-   warnings.
+   migration head, table counts, json1 status, `busy_timeout`, any schema-drift
+   warnings, and the same FTS sidecar health section as `check-deps`.
 
 If both come back clean, the plugin core is healthy and the issue is likely scoped
-to one tool or to the optional `ck` search path.
+to one tool or to the optional `ck` semantic search path.
 
 ## Plugin Tools Do Not Appear After Config Change
 
@@ -58,21 +60,133 @@ Fix:
 
 ## Search Returns CK_NOT_FOUND
 
-`search-text` or `grep-session` returns the error code `CK_NOT_FOUND`.
+`search-text` returns the error code `CK_NOT_FOUND` for a `sem` or `hybrid` query.
 
 Quick checks:
 
 - Confirm whether `ck` is installed and on `PATH`: `ck --version`.
-- Run `bunx opencode-sessions-explorer-check-deps` and look at the `ck` line.
+- Run `bunx opencode-sessions-explorer-check-deps` and look at the `ck CLI` line.
 
 Fix:
 
-- Install [`ck`](https://github.com/BeaconBay/ck) (>= 0.7). If it is installed
-  outside `PATH`, point the plugin at it with
-  `OPENCODE_SESSIONS_EXPLORER_CK_BIN=/abs/path/to/ck`.
-- `ck` is only needed for `search-text` and `grep-session`. The other 16 tools work
-  without it, so recall, browse, cost, and analysis tools remain available
-  meanwhile. See [configuration.md](../reference/configuration.md).
+- Install [`ck`](https://github.com/BeaconBay/ck) (>= 0.7), e.g.
+  `cargo install ck-search`. If it is installed outside `PATH`, point the
+  plugin at it with `OPENCODE_SESSIONS_EXPLORER_CK_BIN=/abs/path/to/ck`.
+- `ck` is only needed for `sem`/`hybrid` `search-text` modes. Every other
+  search path — literal, `lex`, `regex`, and all of `grep-session` — works
+  without it, along with the other 16 tools. See
+  [configuration.md](../reference/configuration.md).
+
+## Search Returns RG_NOT_FOUND, Or `regex` Mode Fails
+
+`search-text` (mode `regex`) or `grep-session` returns `RG_NOT_FOUND`, or
+`check-deps` reports the `ripgrep (rg)` line as a hard failure.
+
+Quick checks:
+
+- Confirm `rg` is installed and on `PATH`: `rg --version`.
+- Run `bunx opencode-sessions-explorer-check-deps` and look at the
+  `ripgrep (rg)` line for the resolved path and version.
+
+Fix:
+
+- Install ripgrep: `brew install ripgrep` (macOS), `apt install ripgrep`
+  (Debian/Ubuntu), or `cargo install ripgrep`.
+- If it is installed outside `PATH`, point the plugin at it with
+  `OPENCODE_SESSIONS_EXPLORER_RG_BIN=/abs/path/to/rg`.
+- `rg` is required for `regex`-mode `search-text` queries, the exhaustive
+  fallback tier, and `grep-session` (which uses ripgrep exclusively — every
+  `grep-session` call fails without `rg`, regardless of channel). A query
+  that needs `rg` as its primary backend fails outright with `RG_NOT_FOUND`
+  when `rg` is missing — it no longer silently falls back to `ck` (the old
+  behavior, which then timed out over the full export tree and returned
+  nothing). Literal/`lex` queries served by the FTS sidecar, and `sem`/
+  `hybrid` queries served by `ck`, are unaffected by a missing `rg`. See
+  [configuration.md](../reference/configuration.md).
+
+## FTS Index Missing Or Search Feels Slow
+
+`search-text` warns that the FTS index is not built and literal search is
+using a slower backend, or `check-deps` reports the `FTS sidecar` line as
+"not built".
+
+Quick checks:
+
+- Run `bunx opencode-sessions-explorer-check-deps` and look at the
+  `FTS sidecar` line for doc count, size, indexed channels, and cursor.
+- Confirm the query is actually literal (no regex metacharacters) — a real
+  regex pattern is always served by ripgrep, never the FTS index, so this is
+  expected behavior, not a problem.
+- Confirm the query has a usable 3+ character contiguous run. A 1-2
+  character literal (including a 1-2 character CJK or emoji query) is below
+  the trigram index's floor and is always routed to ripgrep — that is
+  expected, not a sign the index is broken. See
+  [architecture.md](../reference/architecture.md#latency).
+- If you ran `fts-build` with `--budget-ms` (or it was interrupted), check
+  its own output for `COMPLETE = false` — a partial build is not treated as
+  authoritative and the intended behavior is to fall back to ripgrep until a
+  full build finishes.
+
+Fix:
+
+- Build (or finish building) the sidecar:
+
+  ```bash
+  bunx opencode-sessions-explorer-fts-build
+  ```
+
+  Run it without `--budget-ms` until it reports `COMPLETE = true` if a
+  previous run was partial.
+- Without a usable index, a literal query transparently falls back to
+  ripgrep with a warning rather than failing — search still works, just
+  slower (see [architecture.md](../reference/architecture.md#latency) for
+  measured numbers; a common short word is not "milliseconds" even on the
+  fast path).
+- If the index exists but does not cover the channels you requested (see
+  `OPENCODE_SESSIONS_EXPLORER_FTS_CHANNELS` in
+  [configuration.md](../reference/configuration.md)), the same fallback
+  applies for those channels only.
+
+## Reading `backend` And `plan_reason` When A Search Feels Unexpectedly Slow
+
+Every `search-text` response includes `backend` (`fts`, `rg`, or `ck` — which
+engine actually produced the results), `backends_tried` (the full escalation
+chain attempted), `plan_reason` (why the planner chose the primary backend),
+and `search_duration_ms` (total wall-clock across the whole chain, including
+any escalation).
+
+Quick checks:
+
+- If `backend` is `rg` when you expected fast `fts` speed: check
+  `plan_reason`. It names one of: "fts index unavailable", "fts does not
+  cover requested channels: …", or (for a 1-2 character literal) that the
+  query has no usable 3+ character trigram run. The first two point at the
+  FTS Index Missing fix above (or, for the channel case, adding those
+  channels to `OPENCODE_SESSIONS_EXPLORER_FTS_CHANNELS` and re-running
+  `fts-build`); the trigram-length case is expected behavior for a very
+  short query, not a bug.
+- If `backends_tried` has more than one entry, the first backend returned zero
+  hits and the tool escalated automatically — this is expected recall-
+  preserving behavior, not an error. Note that escalation only fires on
+  **zero** hits for the whole query — a term found once in an indexed
+  `tool-output` excerpt and once in an omitted middle (or via a non-ASCII
+  case fold `fts` cannot match but `rg` can — see
+  [architecture.md](../reference/architecture.md#fts-coverage-limitations))
+  will not escalate, because the excerpt hit already made the result
+  non-empty.
+- Even on the `fts` path, `search_duration_ms` in the tens to low hundreds of
+  milliseconds is normal for a common short literal (high row cardinality
+  plus an `ORDER BY` temp B-tree) — see
+  [architecture.md](../reference/architecture.md#latency) for the measured
+  table. Only a rare, selective literal is reliably single-digit
+  milliseconds.
+- A slow `rg` result over the `raw` channel or an unscoped `surface:'forensics'`
+  sweep is expected: ripgrep is the exhaustive tier and reads the full
+  filesystem export tree. Pre-filter with `session_ids`/`project_id`/
+  `since_ms` to narrow it.
+- `ck` is never in `backends_tried` for a literal or regex query — if you see
+  slow results and expected `ck` involvement, confirm you actually requested
+  `mode:'sem'` or `mode:'hybrid'`.
 
 ## Database Not Found
 
@@ -99,25 +213,38 @@ A search returns zero hits for a term you expect to exist.
 
 Quick checks:
 
-- Confirm the export tree has been materialized at least once.
+- Confirm the export tree (and, for literal/`lex` queries, the FTS sidecar) has
+  been materialized at least once.
 - Note whether the session you expect is very new — its parts may not be exported
-  yet.
+  or indexed yet.
 - Confirm the term is not being narrowed away by `role`, `surface`, or a time/scope
   filter.
 
 Fix:
 
-- Run the one-time export, then retry:
+- Run the one-time export and FTS build, then retry:
 
   ```bash
   bunx opencode-sessions-explorer-bulk-export
+  bunx opencode-sessions-explorer-fts-build
   ```
 
 - New parts are delta-synced automatically before each `search-text` /
-  `grep-session` call, so a missing recent part usually resolves on the next search.
+  `grep-session` call (the `fts` backend syncs the sidecar directly from
+  SQLite; `rg`/`ck` sync the export tree), so a missing recent part usually
+  resolves on the next search.
 - Widen the search: try `surface:'forensics'` (or `channels:['raw']`) to include raw
   bodies, and confirm `role` is `any`. See
   [search-surfaces.md](../reference/search-surfaces.md).
+- If the term should exist and none of the above explain it, consider two
+  known FTS limitations: the trigram substring table's case folding is
+  ASCII-only (a non-ASCII case fold ripgrep's `-i` would find can be missed —
+  try `mode:'regex'` with an explicit case-insensitive pattern, which routes
+  to ripgrep), and `tool-output` is indexed as a 4 KB head + 4 KB tail
+  excerpt, so a term that only appears in the omitted middle of a very large
+  tool-output document is not in the fast index — `surface:'forensics'`
+  reaches it. See
+  [architecture.md](../reference/architecture.md#fts-coverage-limitations).
 
 ## grep-session Returns INDEX_MISSING
 
@@ -225,6 +352,6 @@ Fix:
 - Tool catalog: [../reference/tools.md](../reference/tools.md)
 - Configuration and environment overrides: [../reference/configuration.md](../reference/configuration.md)
 - Search surfaces and channels: [../reference/search-surfaces.md](../reference/search-surfaces.md)
-- Four-layer architecture: [../reference/architecture.md](../reference/architecture.md)
+- Architecture and query planner: [../reference/architecture.md](../reference/architecture.md)
 - Export and maintenance workflow: [../guides/export-and-maintenance.md](../guides/export-and-maintenance.md)
 - Data exposure and redaction policy: [../../.github/SECURITY.md](../../.github/SECURITY.md)
