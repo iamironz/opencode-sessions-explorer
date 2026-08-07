@@ -97,8 +97,7 @@ A `list-sessions` result interns the repetitive `agent`, `model`, `directory`, a
     "dict": {
       "agent": ["build"],
       "model": [{ "id": "claude-opus" }],
-      "directory": ["/projects/app"],
-      "project_id": []
+      "directory": ["/projects/app"]
     },
     "rows": [
       ["ses_a1", "Fix retry bug", 0, 0, 0, 0.42]
@@ -108,6 +107,10 @@ A `list-sessions` result interns the repetitive `agent`, `model`, `directory`, a
 }
 ```
 
+A `dict` column that has no interned values (every row's value was empty/absent
+for that column) is dropped from `dict` entirely rather than kept as `[]` — a
+key present in `dict` always has at least one value.
+
 Apply the decode rule to recover the records, then read `cost` (a literal column)
 directly.
 
@@ -115,6 +118,6 @@ directly.
 
 - Tool catalog: [tools.md](tools.md)
 - Search surfaces and channels: [search-surfaces.md](search-surfaces.md)
-- Four-layer architecture: [architecture.md](architecture.md)
+- Layered architecture and the search query planner: [architecture.md](architecture.md)
 - Configuration and environment overrides: [configuration.md](configuration.md)
 - Troubleshooting: [../support/troubleshooting.md](../support/troubleshooting.md)

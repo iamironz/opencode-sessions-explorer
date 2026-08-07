@@ -11,7 +11,8 @@ grant the one permission it needs to read the OpenCode session database.
 | --- | --- |
 | OpenCode | A working OpenCode install with plugin host compatibility for `@opencode-ai/plugin >= 1.15.0` |
 | Bun | `>= 1.0`; bundled with OpenCode, needed standalone only to run the CLIs directly. The plugin uses `bun:sqlite`, which should include SQLite `json1`; `check-deps` / `db-stats` verify it. |
-| `ck` (optional) | `>= 0.7`, only for `search-text` and `grep-session` |
+| `ripgrep` (`rg`) | Required for `regex`-mode search, the exhaustive fallback tier, and every `grep-session` call (`brew install ripgrep` / `apt install ripgrep` / `cargo install ripgrep`); `check-deps` verifies it. A missing `rg` returns a hard `RG_NOT_FOUND` error for a query that needs it. |
+| `ck` (optional) | `>= 0.7`, only for `sem`/`hybrid` search modes |
 
 ## Steps
 

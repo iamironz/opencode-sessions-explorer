@@ -87,7 +87,7 @@ export function markChannelExportComplete(root = exportRoot()): void {
   renameSync(tmp, p)
 }
 
-type SessionInfo = {
+export type SessionInfo = {
   id: string
   title: string
   project_id: string
@@ -380,7 +380,7 @@ function writeSessionSummaryChannel(s: SessionInfo, dirRoot = exportRoot()): voi
   renameSync(tmp, p)
 }
 
-function buildSessionSummaryDocument(s: SessionInfo): string {
+export function buildSessionSummaryDocument(s: SessionInfo): string {
   const firstPrompt = firstUserPrompt(s.id, "ASC")
   const lastPrompt = firstUserPrompt(s.id, "DESC")
   const model = decodeModel(s.model)

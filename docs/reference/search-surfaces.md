@@ -56,7 +56,20 @@ Channels are the derived views the export tree materializes under
 | `patch-summary` | Files changed per patch, with hash and file count. |
 | `reasoning` | Assistant reasoning text. |
 | `file` | File-reference parts (filename, URL, source path). |
-| `raw` | The full-fidelity per-session export, including every searchable body. Selected by the `forensics` surface. |
+| `raw` | The full-fidelity per-session export, including every searchable body. Selected by the `forensics` surface. Never served by the FTS sidecar (its indexed channel set excludes `raw` by default) — always routed to ripgrep, which is also far faster here than `ck` was (measured ~6.2s vs 30-34s timeouts over the same tree). See [architecture.md](architecture.md). |
+
+For `search-text` only, every channel except `raw` is covered by the FTS
+sidecar by default (see [architecture.md](architecture.md) and
+[configuration.md](configuration.md#environment-overrides) for the
+`OPENCODE_SESSIONS_EXPLORER_FTS_CHANNELS` override), so a literal query with
+a usable 3+ character trigram run on any of `recall`, `debug_trace`,
+`tool_audit`, or `code` is usually fast — see
+[architecture.md](architecture.md#latency) for measured numbers, which range
+from single-digit milliseconds for a selective identifier to several hundred
+milliseconds for a common short word. A `forensics` search (or an explicit
+`channels:['raw']`), a too-short literal, or a real regex pattern always
+drops to the ripgrep tier. `grep-session` has no FTS tier at all — every
+`grep-session` call, on every channel, uses ripgrep.
 
 ## Grep Defaults
 
@@ -100,7 +113,7 @@ opencode-sessions-explorer-search-text { "q": "git push", "surface": "tool_audit
 
 - Tool catalog: [tools.md](tools.md)
 - Compact result format: [response-format.md](response-format.md)
-- Four-layer architecture: [architecture.md](architecture.md)
+- Architecture and query planner: [architecture.md](architecture.md)
 - Search and grep workflow: [../guides/search-and-grep.md](../guides/search-and-grep.md)
 - Export and maintenance workflow: [../guides/export-and-maintenance.md](../guides/export-and-maintenance.md)
 - Troubleshooting: [../support/troubleshooting.md](../support/troubleshooting.md)
