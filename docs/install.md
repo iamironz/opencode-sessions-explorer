@@ -102,6 +102,67 @@ no hot reload guarantee for local plugin paths.
 For contributor commands, quality gates, and source-dev maintenance pointers, see
 the [Development Guide](maintainers/development.md).
 
+## Use From A Non-OpenCode MCP Host
+
+The package ships a second entry point, `dist/mcp.js`, that serves the same tools
+over the Model Context Protocol on stdio. Use it when the caller is **not**
+OpenCode (any MCP-capable agent or client). OpenCode users do not need this; the
+plugin path above already registers every tool.
+
+Both entry points read the same registry in `src/tools/index.ts`, so there is no
+second tool catalog to keep in sync.
+
+### Host Configuration
+
+Build once (`bun run build`), then point the host at the built file:
+
+```yaml
+mcp_servers:
+  opencode-history:
+    command: bun
+    args: ["run", "/home/iamironz/projects/opencode-sessions-explorer/dist/mcp.js"]
+```
+
+Replace the path with your own checkout. Installed as a package, the equivalent
+command is the `opencode-sessions-explorer-mcp` bin.
+
+The host still needs read access to `~/.local/share/opencode/` — the MCP server
+reads the same database described in [Configuration](reference/configuration.md),
+and honors the same `OPENCODE_SESSIONS_EXPLORER_*` environment overrides.
+
+### Exposed Tools
+
+16 of the 18 tools are exposed. The `opencode-sessions-explorer-` prefix is
+stripped because the MCP host supplies its own namespace, so
+`opencode-sessions-explorer-list-sessions` is called as `list-sessions`:
+
+| Category | Tools |
+| --- | --- |
+| Recall and navigation | `list-sessions`, `get-session`, `session-summary`, `session-timeline`, `session-genealogy`, `get-message`, `get-part` |
+| Search | `search-text`, `grep-session`, `search-sessions-meta`, `search-tool-calls` |
+| Cost and usage | `cost-by-period`, `cost-by-project`, `list-repeated-prompts`, `list-tool-failures` |
+| Diagnostics | `db-stats` |
+
+### Deliberate Exclusions
+
+| Tool | Why It Is Withheld |
+| --- | --- |
+| `current-session` | Answers "which session am I running in", which is resolved from OpenCode host identity. A foreign host has no such identity, so the result would be meaningless. |
+| `unarchive-session` | The only write path into the live `opencode.db`. This entry point is read-only by design. |
+
+To restore an archived session, use the OpenCode plugin path and
+[Manage Archived Sessions](guides/manage-archived-sessions.md).
+
+### Validate The MCP Entry Point
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | bun run dist/mcp.js
+```
+
+A healthy server replies with a JSON-RPC result listing 16 tools. Unknown tool
+names return an MCP result with `isError: true` rather than terminating the
+server. `stdout` carries only JSON-RPC frames, so never add logging to it.
+
 ## Validate
 
 Confirm the install resolved and the database is reachable:

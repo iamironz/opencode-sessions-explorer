@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- MCP stdio entry point (`dist/mcp.js`, bin `opencode-sessions-explorer-mcp`) that
+  serves the tool registry to non-OpenCode MCP hosts. Exposes 16 of the 18 tools with
+  the `opencode-sessions-explorer-` prefix stripped; `current-session` (depends on
+  OpenCode host identity) and `unarchive-session` (the only database write path) are
+  withheld, keeping this entry point read-only. The OpenCode plugin entry point and
+  its build output are unchanged.
+
 ## [0.1.4] - 2026-06-14
 
 ### Fixed

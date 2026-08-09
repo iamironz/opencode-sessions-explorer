@@ -158,6 +158,7 @@ Docs home: [docs/README.md](docs/README.md)
 | Goal | Doc |
 | --- | --- |
 | Install and first run | [docs/install.md](docs/install.md), [docs/getting-started.md](docs/getting-started.md) |
+| Use from a non-OpenCode MCP host | [docs/install.md](docs/install.md#use-from-a-non-opencode-mcp-host) |
 | Recall and navigation | [docs/guides/recall-and-navigation.md](docs/guides/recall-and-navigation.md) |
 | Search and grep | [docs/guides/search-and-grep.md](docs/guides/search-and-grep.md) |
 | Cost and usage analysis | [docs/guides/cost-and-usage-analysis.md](docs/guides/cost-and-usage-analysis.md) |

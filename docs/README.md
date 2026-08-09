@@ -21,6 +21,7 @@ a question about your OpenCode session history to the tool or command that answe
 | If You Need To... | Read |
 | --- | --- |
 | Install the plugin and run a first query | [getting-started.md](getting-started.md), [install.md](install.md) |
+| Call the tools from a non-OpenCode MCP host | [install.md](install.md#use-from-a-non-opencode-mcp-host) |
 | Recall a session and drill into its content | [guides/recall-and-navigation.md](guides/recall-and-navigation.md) |
 | Search across your whole session history | [guides/search-and-grep.md](guides/search-and-grep.md) |
 | Grep inside one known session | [guides/search-and-grep.md](guides/search-and-grep.md) |

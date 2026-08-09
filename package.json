@@ -42,10 +42,11 @@
   "bin": {
     "opencode-sessions-explorer-bulk-export": "./dist/bin/bulk-export.js",
     "opencode-sessions-explorer-dedupe-export": "./dist/bin/dedupe-export.js",
-    "opencode-sessions-explorer-check-deps": "./dist/bin/check-deps.js"
+    "opencode-sessions-explorer-check-deps": "./dist/bin/check-deps.js",
+    "opencode-sessions-explorer-mcp": "./dist/mcp.js"
   },
   "scripts": {
-    "build": "bun run clean && bun build src/plugin.ts src/lib/export-reconcile-worker.ts --target=bun --format=esm --outdir=dist && bun build src/bin/bulk-export.ts src/bin/dedupe-export.ts src/bin/check-deps.ts --target=bun --format=esm --outdir=dist/bin",
+    "build": "bun run clean && bun build src/plugin.ts src/lib/export-reconcile-worker.ts --target=bun --format=esm --outdir=dist && bun build src/mcp.ts --target=bun --format=esm --outdir=dist && bun build src/bin/bulk-export.ts src/bin/dedupe-export.ts src/bin/check-deps.ts --target=bun --format=esm --outdir=dist/bin",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "bun test tests/",
     "test:live": "OPENCODE_SESSIONS_EXPLORER_LIVE=1 bun test tests/",
@@ -65,6 +66,7 @@
     "@opencode-ai/plugin": ">=1.15.0"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
