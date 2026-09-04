@@ -18,7 +18,7 @@ L2  filesystem export tree (~/.local/share/opencode-sessions-explorer)
       | by-session/<ses_id>/...  +  by-channel/<channel>/by-session/<ses_id>/...
       | delta-synced before each search call
       v
-L3  ck index (.ck/, BM25 + embeddings; optional)
+L3  ck semantic index (.ck/; optional)
       | incremental; built by the ck CLI
       v
 L4  enriched response
@@ -57,13 +57,13 @@ unbudgeted bulk exports perform full tombstone cleanup inline.
 ### L3 — ck Index (Optional)
 
 `search-text` and `grep-session` shell out to the [`ck`](https://github.com/BeaconBay/ck)
-CLI, which walks the export tree. `ck` supports plain regex with no index, a BM25
-full-text index, and semantic embeddings; the index lives under `.ck/` in the export
-root and is incremental. `ck` is optional: when it is absent these two tools return
-`CK_NOT_FOUND` cleanly and the other 16 tools are unaffected.
-The plugin invokes normal `lex`, `sem`, and `hybrid` `ck` searches and lets `ck`
-perform its lazy index build/refresh; explicit index commands are optional prewarm
-or troubleshooting steps, not a prerequisite for first use.
+CLI, which walks the export tree. Regex needs no index; semantic embeddings use the
+incremental index under `.ck/` in the export root. `ck` is optional: when it is absent
+these two tools return `CK_NOT_FOUND` cleanly and the other 16 tools are unaffected.
+The plugin invokes `sem` and `hybrid` searches for `search-text` and regex searches
+for `grep-session`. `ck` performs lazy semantic index build and refresh operations.
+Explicit index commands are optional prewarm or troubleshooting steps, not a
+prerequisite for first use.
 
 ### L4 — Enriched Response
 

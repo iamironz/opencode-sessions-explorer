@@ -72,8 +72,9 @@ bunx opencode-sessions-explorer-bulk-export
 ```
 
 1. (Optional) Prewarm the `ck` index from the export root, not the repo root.
-   Normal `lex`, `sem`, and `hybrid` searches ask `ck` to build or refresh indexes
-   lazily, so this step is only for avoiding first-search latency or troubleshooting:
+   Semantic `search-text` searches (`sem` and `hybrid`) ask `ck` to build or refresh
+   the index lazily, so this step is only for avoiding first-search latency or
+   troubleshooting:
 
 ```bash
 cd ~/.local/share/opencode-sessions-explorer
@@ -128,9 +129,9 @@ full first-run walkthrough, see [docs/install.md](docs/install.md) and
 
 - **One-time export.** `bulk-export` materializes searchable session content for `ck`.
 - **Stay current.** The plugin auto-syncs new parts before each search call, then
-  lets normal `lex`, `sem`, and `hybrid` `ck` searches lazily build or refresh their
-  indexes. Explicit `ck --index .` / `ck --reindex .` runs are optional prewarm or
-  troubleshooting steps for stale or partial coverage warnings.
+  lets semantic `search-text` searches lazily build or refresh the index. Explicit
+  `ck --index .` / `ck --reindex .` runs are optional prewarm or troubleshooting
+  steps for stale or partial coverage warnings.
 - **Health probe.** `check-deps` and the `db-stats` tool report dependency and schema
   health.
 - See [docs/guides/export-and-maintenance.md](docs/guides/export-and-maintenance.md).

@@ -61,7 +61,7 @@ The plugin is a 4-layer pipeline:
 ```
 SQLite DB (read-only source of truth)
   -> filesystem export tree (~/.local/share/opencode-sessions-explorer; by-session + by-channel)
-  -> ck index (.ck/; BM25 + embeddings; optional)
+  -> ck semantic index (.ck/; optional)
   -> enriched response (re-fetches session/part metadata from SQLite per hit)
 ```
 

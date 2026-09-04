@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- Removed the `lex` mode from `search-text` and `grep-session`. `search-text` now
+  exposes `regex`, `sem`, and `hybrid`; `grep-session` uses regex only and no longer
+  has a `mode` argument.
+
 ### Added
 - MCP stdio entry point (`dist/mcp.js`, bin `opencode-sessions-explorer-mcp`) that
   serves the tool registry to non-OpenCode MCP hosts. Exposes 16 of the 18 tools with

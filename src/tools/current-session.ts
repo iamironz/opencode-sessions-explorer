@@ -86,7 +86,7 @@ export const currentSession = tool({
             { use: "opencode-sessions-explorer-session-timeline", purpose: "walk this session chronologically", args: { session_id: sessionId } },
             { use: "opencode-sessions-explorer-session-summary", purpose: "summarize what happened in this session", args: { session_id: sessionId } },
             { use: "opencode-sessions-explorer-session-genealogy", purpose: "show ancestors and descendants of this session", args: { session_id: sessionId, direction: "both" } },
-            { use: "opencode-sessions-explorer-grep-session", purpose: "regex/lex search inside this session", args: { session_id: sessionId, pattern: "<query>" } },
+            { use: "opencode-sessions-explorer-grep-session", purpose: "regex search inside this session", args: { session_id: sessionId, pattern: "<query>" } },
             { use: "opencode-sessions-explorer-search-tool-calls", purpose: "find tool calls in this session", args: { session_id: sessionId } },
           ]
         : []

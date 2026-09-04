@@ -54,7 +54,7 @@ working. `search-tool-calls` queries the database directly and does not need `ck
 
 | Tool | What It Does | Read/Write |
 | --- | --- | --- |
-| `search-text` | Full-text search across the bodies of all sessions (user prompts, assistant responses, tool input/output, reasoning, file references, patches, subtask prompts). Surface- and channel-aware; supports `regex`, `lex` (BM25), `sem`, and `hybrid` modes, a `role` filter, and `group_by_session` rollups. | Read |
+| `search-text` | Full-text search across the bodies of all sessions (user prompts, assistant responses, tool input/output, reasoning, file references, patches, subtask prompts). Surface- and channel-aware; supports `regex`, `sem`, and `hybrid` modes, a `role` filter, and `group_by_session` rollups. | Read |
 | `grep-session` | grep/regex search inside one session's exported body content (fast; operates on that session's part files only). Supports `fixed_string`, `case_sensitive`, `whole_word`, and `context_lines`. | Read |
 | `search-tool-calls` | Finds tool invocations across sessions, filtered by tool name (exact or `LIKE` wildcard), status, or substring on input/output/error. Returns capped snippets; cursor-paginated, newest-first. | Read |
 

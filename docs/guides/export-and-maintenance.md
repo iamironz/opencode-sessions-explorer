@@ -13,7 +13,7 @@ four-layer pipeline:
 ```text
 SQLite DB (read-only source of truth)
   -> filesystem export tree (~/.local/share/opencode-sessions-explorer; by-session + by-channel)
-  -> ck index (.ck/, BM25 + embeddings; optional)
+  -> ck semantic index (.ck/; optional)
   -> enriched response (re-fetches session/part metadata from SQLite per hit)
 ```
 
@@ -54,11 +54,11 @@ maintenance.
    bunx opencode-sessions-explorer-bulk-export --reset
    ```
 
-1. (Optional) Prewarm the `ck` index. Normal `lex`, `sem`, and `hybrid` searches
-   invoke `ck` in the requested mode so `ck` can lazily build or refresh indexes
-   during the search. Run these commands only to avoid first-search latency or to
-   troubleshoot stale/partial coverage warnings, and run them from the export root,
-   not from the repository checkout:
+1. (Optional) Prewarm the `ck` index. Semantic `search-text` searches invoke `ck` in
+   the requested mode so `ck` can lazily build or refresh the index during the
+   search. Run these commands only to avoid
+   first-search latency or to troubleshoot stale/partial coverage warnings, and run
+   them from the export root, not from the repository checkout:
 
    ```bash
    cd ~/.local/share/opencode-sessions-explorer

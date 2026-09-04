@@ -1,25 +1,6 @@
-/**
- * opencode-sessions-explorer-search-text
- *
- * Canonical interface for "where in my OpenCode history did X happen?" and
- * "find sessions mentioning Y" queries. Backed by the local `ck` CLI over the
- * filesystem export of session content.
- *
- * Modes:
- *   regex   — drop-in grep, no index needed (default; works always)
- *   lex     — BM25 full-text (auto-builds Tantivy index)
- *   sem     — semantic embeddings (ck lazily builds/refreshes the index)
- *   hybrid  — combined regex + semantic (ck lazily builds/refreshes the index)
- *
- * SCOPING: cross-session content search has unbounded fan-out. To keep response
- * times reasonable, callers SHOULD pre-filter via session_ids / project_id /
- * agent / since_ms. The tool dispatches to ck only on the resulting scope set.
- *
- * Cap: 160 KB.
- */
 import { tool } from "@opencode-ai/plugin"
 import { stmt } from "../lib/db.js"
-import { runWithEnvelope } from "../lib/envelope.js"
+import { runWithEnvelope, fail } from "../lib/envelope.js"
 import { runCk, ckIndexFreshness, type CkIndexFreshness, type CkIndexStatus, type CkScopeCoverage } from "../lib/ck.js"
 import { channelExportComplete, runExport, exportRoot } from "../lib/export.js"
 import { existsSync } from "node:fs"
@@ -39,12 +20,12 @@ export const searchText = tool({
     "CRITICAL ARG `role` (default 'any'): which message roles to search inside. **Default to 'any'** for natural-language questions like \"where did I mention X\", \"find sessions about Y\", \"did I discuss Z\" — these are asking about appearances ANYWHERE in your conversations (user prompts AND assistant text AND tool I/O AND reasoning). " +
     "Only set role='user' when the user EXPLICITLY narrows to authored messages: \"what prompts have I typed containing X\", \"my user-authored messages mentioning Y\", \"questions I sent OpenCode with Z\". Phrases like \"did I mention\" / \"in my history\" / \"have I discussed\" do NOT imply role='user' — those are asking about the corpus as a whole. " +
     "Only set role='assistant' for questions explicitly about what the AI said (\"what has the assistant said about X\"). " +
-    "Modes: 'regex' (default — drop-in grep, no index needed), 'lex' (BM25 phrase search, lets ck auto-build/update its Tantivy index), 'sem' (semantic embeddings, lets ck lazily build/refresh its index), 'hybrid' (regex + sem). " +
+    "Modes: 'regex' (default — drop-in grep, no index needed), 'sem' (semantic embeddings, lets ck lazily build/refresh its index), 'hybrid' (regex + sem). " +
     "Pre-filter cross-session searches via session_ids[], project_id, agent, since_ms/until_ms — unscoped full-corpus search can take 10-30 seconds. Scoped searches return in <1s. " +
     "For grep INSIDE a single known session use grep-session instead (faster, narrower).",
   args: {
-    q: tool.schema.string().describe("Search query (regex pattern, BM25 phrase, or natural-language depending on mode)"),
-    mode: tool.schema.enum(["regex", "lex", "sem", "hybrid"]).default("regex"),
+    q: tool.schema.string().describe("Search query (regex pattern or natural-language query depending on mode)"),
+    mode: tool.schema.enum(["regex", "sem", "hybrid"]).default("regex"),
     surface: tool.schema.enum(["recall", "debug_trace", "tool_audit", "code", "forensics"]).default("recall").describe("Retrieval preset. recall is curated/default; forensics searches raw replay data."),
     channels: tool.schema.array(tool.schema.enum(CHANNELS)).optional().describe("Override surface-derived channels. Use raw for current full-fidelity behavior."),
     group_by_session: tool.schema.boolean().optional().describe("If true, return one entry per matching session with evidence snippets instead of one entry per part. Defaults true for unscoped recall and false for scoped/forensic searches."),
@@ -64,6 +45,10 @@ export const searchText = tool({
   },
   async execute(args) {
     return runWithEnvelope("search_text", 160, async (ctx) => {
+      const runtimeMode: unknown = args.mode
+      if (runtimeMode !== undefined && runtimeMode !== "regex" && runtimeMode !== "sem" && runtimeMode !== "hybrid") {
+        fail("BAD_ARGS", `unsupported search mode: ${String(runtimeMode)}`, "Use regex, sem, or hybrid.")
+      }
       const surface = inferSurface(args.q, args.surface as SearchSurface)
       const channels = normalizeChannels(args.channels?.length ? args.channels : channelsForSurface(surface, args.q))
       const groupBySession = args.group_by_session ?? (surface !== "forensics" && !args.session_ids?.length)
@@ -189,7 +174,7 @@ function emptySuppressed(channels: SearchChannel[]) {
   return { duplicate_hits: 0, omitted_channels: CHANNELS.filter((c) => !channels.includes(c) && c !== "raw") }
 }
 
-async function runWithCk(args: any, scopes: string[], mode: "regex" | "lex" | "sem" | "hybrid", ctx: any, sessionCount: number | null, topk: number, channels: SearchChannel[], surface: SearchSurface, groupBySession: boolean) {
+async function runWithCk(args: any, scopes: string[], mode: "regex" | "sem" | "hybrid", ctx: any, sessionCount: number | null, topk: number, channels: SearchChannel[], surface: SearchSurface, groupBySession: boolean) {
   const ck = await runCk({
     mode,
     query: args.q,

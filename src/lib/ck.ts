@@ -1,24 +1,10 @@
-/**
- * Thin shell-out wrapper for the `ck` CLI (https://github.com/BeaconBay/ck).
- *
- * ck modes:
- *   regex   — drop-in grep, no index needed (fast on small scope)
- *   lex     — BM25 full-text, auto-builds Tantivy index
- *   sem     — semantic embeddings, lazily builds/refreshes the ck index
- *   hybrid  — RRF of regex + semantic
- *
- * We use `--jsonl` for structured output. Each line is one hit:
- *   { path, span:{byte_start,byte_end,line_start,line_end}, language, snippet, score }
- *
- * Timeouts are enforced by killing the child process via AbortController.
- */
 import { spawn } from "node:child_process"
 import type { ChildProcessWithoutNullStreams } from "node:child_process"
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { exportRoot } from "./export.js"
 import { SessionsError } from "./errors.js"
 
-export type CkMode = "regex" | "lex" | "sem" | "hybrid"
+export type CkMode = "regex" | "sem" | "hybrid"
 
 export type CkHit = {
   path: string
@@ -31,16 +17,16 @@ export type CkHit = {
 export type CkOptions = {
   mode: CkMode
   query: string
-  scopes: string[]               // paths to search (files or dirs)
-  topk?: number                  // ck --topk N
-  threshold?: number             // ck --threshold X
-  contextLines?: number          // ck -C N
-  caseSensitive?: boolean        // default false → -i
-  wholeWord?: boolean            // ck -w
-  fixedString?: boolean          // ck -F (no regex)
-  noSnippet?: boolean            // ck --no-snippet
-  excludePatterns?: string[]     // ck --exclude PAT ...
-  timeoutMs?: number             // hard kill
+  scopes: string[]
+  topk?: number
+  threshold?: number
+  contextLines?: number
+  caseSensitive?: boolean
+  wholeWord?: boolean
+  fixedString?: boolean
+  noSnippet?: boolean
+  excludePatterns?: string[]
+  timeoutMs?: number
 }
 
 export type CkRunResult = {
@@ -106,7 +92,6 @@ export async function runCk(opts: CkOptions): Promise<CkRunResult> {
   const args = ["--jsonl"]
   switch (opts.mode) {
     case "regex": args.push("--regex"); break
-    case "lex": args.push("--lex"); break
     case "sem": args.push("--sem"); break
     case "hybrid": args.push("--hybrid"); break
   }
@@ -174,7 +159,6 @@ export async function runCk(opts: CkOptions): Promise<CkRunResult> {
     throw new SessionsError("CK_FAILED", `ck process failed: ${childError.message}`)
   }
 
-  // Flush trailing buf
   if (buf.trim()) {
     try { const obj = JSON.parse(buf.trim()); if (obj?.path) hits.push(obj as CkHit) } catch {}
   }
@@ -241,7 +225,6 @@ async function runCkMultiScope(opts: CkOptions): Promise<CkRunResult> {
   }
 }
 
-/** Returns true if a ck semantic/lex index appears present in the export root. */
 export function ckIndexPresent(root = exportRoot()): { present: boolean; embedded_chunks: number | null } {
   const manifestPath = `${root}/.ck/manifest.json`
   if (!existsSync(manifestPath)) return { present: false, embedded_chunks: null }

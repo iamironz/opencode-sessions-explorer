@@ -1,9 +1,3 @@
-/**
- * opencode-sessions-explorer-grep-session
- *
- * Pattern search inside ONE session via `ck` regex over its export directory.
- * Fast (~100 files per session). Cap: 160 KB.
- */
 import { tool } from "@opencode-ai/plugin"
 import { stmt } from "../lib/db.js"
 import { runWithEnvelope, fail } from "../lib/envelope.js"
@@ -21,14 +15,13 @@ export const grepSession = tool({
     "Answers: \"inside session ses_X, grep for Y\", \"search session ses_Z for pattern P\", \"find references to X within session ses_Y\", \"regex search in a single session\", \"look up keyword W inside session ses_V\". " +
     "Operates only on the filesystem export of one session's parts (~50-500 files) so it's fast (<200ms typical). Auto delta-syncs any new parts since the last call. " +
     "Default surface is `recall`, searching curated conversation/session-summary channels when available. Use `surface:'forensics'` or channels:['raw'] to search raw exported bodies including tool output and reasoning. " +
-    "Modes: 'regex' (default — like grep) or 'lex' (BM25 phrase). Supports fixed_string (literal match, no regex special chars), case_sensitive, whole_word, context_lines (lines before/after match). " +
+    "Uses regex search. Supports fixed_string (literal match, no regex special chars), case_sensitive, whole_word, context_lines (lines before/after match). " +
     "For CROSS-SESSION content search (across ALL your OpenCode sessions) use search-text instead — that one supports group_by_session, role filter, and semantic modes.",
   args: {
     session_id: tool.schema.string().describe("Session ID"),
     pattern: tool.schema.string().describe("Pattern (regex by default unless fixed_string=true)"),
     surface: tool.schema.enum(["recall", "debug_trace", "tool_audit", "code", "forensics"]).default("recall"),
     channels: tool.schema.array(tool.schema.enum(CHANNELS)).optional().describe("Override surface-derived channels. Use raw for current full-fidelity behavior."),
-    mode: tool.schema.enum(["regex", "lex"]).default("regex"),
     fixed_string: tool.schema.boolean().default(false).describe("Treat pattern as fixed string (no regex)"),
     case_sensitive: tool.schema.boolean().default(false),
     whole_word: tool.schema.boolean().default(false),
@@ -38,11 +31,12 @@ export const grepSession = tool({
   },
   async execute(args) {
     return runWithEnvelope("grep_session", 160, async (ctx) => {
-      // Confirm session exists
+      if ("mode" in (args as object)) {
+        fail("BAD_ARGS", "mode is not supported by grep-session", "Remove mode; grep-session always uses regex.")
+      }
       const session = stmt(`SELECT id, title, directory, time_archived FROM session WHERE id = ?`).get(args.session_id) as any
       if (!session) fail("NOT_FOUND", `session not found: ${args.session_id}`)
 
-      // Delta-sync (cheap if up to date)
       try {
         const syncRes = await runExport({ budgetMs: 3000 })
         if (syncRes.lock_skipped) {
@@ -62,7 +56,7 @@ export const grepSession = tool({
       if (scopes.length === 0) fail("INDEX_MISSING", `session not in export tree (may be very new): ${args.session_id}`, "Run delta-sync or bulk-export.")
 
       const ck = await runCk({
-        mode: args.mode,
+        mode: "regex",
         query: args.pattern,
         scopes,
         topk: args.limit,
@@ -84,8 +78,8 @@ export const grepSession = tool({
         pattern: args.pattern,
         surface,
         channels,
-        mode: args.mode,
-        scanned_files: matches.length, // ck doesn't report total scanned in jsonl; approximate
+        mode: "regex",
+        scanned_files: matches.length,
         matches: table(matches, { dict: ["channel"] }),
         ck_duration_ms: ck.durationMs,
         ck_scope_coverage: ck.scopeCoverage,

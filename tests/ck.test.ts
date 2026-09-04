@@ -2,13 +2,14 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { z } from "zod"
 import { ckIndexFreshness, runCk } from "../src/lib/ck.ts"
 import { _resetExportCacheForTest, exportRoot, setSyncState } from "../src/lib/export.ts"
 import { _resetBackgroundReconcileForTest } from "../src/lib/export-background.ts"
 import { acquireExportLock } from "../src/lib/export-lock.ts"
 import { searchText } from "../src/tools/search-text.ts"
 import { grepSession } from "../src/tools/grep-session.ts"
-import { runTool, loadFixtures } from "./helpers.ts"
+import { runTool, loadFixtures, mockCtx } from "./helpers.ts"
 
 const originalCkBin = process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN
 const F = loadFixtures()
@@ -19,6 +20,47 @@ afterEach(() => {
 })
 
 describe("ck helper freshness and coverage", () => {
+  test("search-text mode schema accepts only regex, sem, and hybrid", () => {
+    const schema = z.object(searchText.args)
+
+    for (const mode of ["regex", "sem", "hybrid"]) {
+      expect(schema.safeParse({ q: "needle", mode }).success).toBe(true)
+    }
+    expect(schema.safeParse({ q: "needle", mode: "lex" }).success).toBe(false)
+  })
+
+  test("grep-session exposes regex search without a mode argument", () => {
+    expect("mode" in grepSession.args).toBe(false)
+  })
+
+  test("search-text rejects removed lex mode before launching ck when schema parsing is bypassed", async () => {
+    const root = tempRoot()
+    const argsLog = join(root, "ck-args.log")
+    process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN = writeFakeCk(root, { argsLog })
+
+    const env = await runToolWithoutSchema(searchText, { q: "needle", mode: "lex" })
+
+    expect(env.ok).toBe(false)
+    expect(env.error?.code).toBe("BAD_ARGS")
+    expect(existsSync(argsLog)).toBe(false)
+  })
+
+  test("grep-session rejects removed mode before launching ck when schema parsing is bypassed", async () => {
+    const root = tempRoot()
+    const argsLog = join(root, "ck-args.log")
+    process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN = writeFakeCk(root, { argsLog })
+
+    const env = await runToolWithoutSchema(grepSession, {
+      session_id: F.sessions.active,
+      pattern: "needle",
+      mode: "lex",
+    })
+
+    expect(env.ok).toBe(false)
+    expect(env.error?.code).toBe("BAD_ARGS")
+    expect(existsSync(argsLog)).toBe(false)
+  })
+
   test("status-json unavailable degrades manifest freshness to partial", async () => {
     const root = tempRoot()
     writeMarker(root)
@@ -113,8 +155,8 @@ describe("ck helper freshness and coverage", () => {
     }))
   })
 
-  for (const mode of ["sem", "hybrid"] as const) {
-    test(`search-text keeps ${mode} mode when semantic index is missing`, async () => {
+  for (const mode of ["regex", "sem", "hybrid"] as const) {
+    test(`search-text constructs ck arguments for ${mode} mode`, async () => {
       await withTempExportRoot(async () => withFakeBackgroundWorker(async () => {
         const fakeRoot = tempRoot()
         const argsLog = join(fakeRoot, "ck-args.log")
@@ -130,19 +172,48 @@ describe("ck helper freshness and coverage", () => {
           timeout_ms: 1000,
         })
 
-        const ckArgs = readFileSync(argsLog, "utf8")
+        const ckInvocations = readFileSync(argsLog, "utf8").trim().split("\n")
+        const searchInvocation = ckInvocations.find((invocation) => invocation.includes("needle"))
+        const searchArgs = searchInvocation?.split(/\s+/) ?? []
         expect(env.ok).toBe(true)
         expect(env.data.mode).toBe(mode)
         expect(env.meta.mode).toBe(mode)
-        expect(env.meta.index_status).toBe("missing")
-        expect(ckArgs).toContain(`--${mode}`)
-        expect(ckArgs).not.toContain("--regex")
-        const warnings = (env.warnings ?? []).join(" ")
-        expect(warnings).toContain("lazily create or update")
-        expect(warnings).not.toContain("falling back to regex")
+        expect(searchInvocation).toBeDefined()
+        expect(searchArgs).toContain(`--${mode}`)
+        expect(searchArgs).not.toContain("--lex")
+        if (mode !== "regex") {
+          expect(env.meta.index_status).toBe("missing")
+          expect(searchArgs).not.toContain("--regex")
+          const warnings = (env.warnings ?? []).join(" ")
+          expect(warnings).toContain("lazily create or update")
+          expect(warnings).not.toContain("falling back to regex")
+        }
       }))
     })
   }
+
+  test("grep-session constructs ck arguments for regex mode", async () => {
+    await withTempExportRoot(async () => withFakeBackgroundWorker(async () => {
+      const fakeRoot = tempRoot()
+      const argsLog = join(fakeRoot, "ck-args.log")
+      process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN = writeFakeCk(fakeRoot, { argsLog })
+
+      const env = await runTool(grepSession, {
+        session_id: F.sessions.active,
+        pattern: "needle",
+        surface: "forensics",
+        channels: ["raw"],
+        limit: 3,
+      })
+
+      const invocation = readFileSync(argsLog, "utf8").trim()
+      const ckArgs = invocation.split(/\s+/)
+      expect(env.ok).toBe(true)
+      expect(env.data.mode).toBe("regex")
+      expect(ckArgs).toContain("--regex")
+      expect(ckArgs).not.toContain("--lex")
+    }))
+  })
 
   test("search-text rechecks ck status after lazy semantic indexing", async () => {
     await withTempExportRoot(async (root) => withFakeBackgroundWorker(async () => {
@@ -252,6 +323,12 @@ describe("ck helper freshness and coverage", () => {
 
 function tempRoot(): string {
   return mkdtempSync(join(tmpdir(), "ose-ck-"))
+}
+
+async function runToolWithoutSchema(def: any, args: Record<string, unknown>): Promise<any> {
+  const result = await def.execute(args, mockCtx())
+  const json = typeof result === "string" ? result : (result.output ?? JSON.stringify(result))
+  return JSON.parse(json)
 }
 
 function writeMarker(root: string): void {
