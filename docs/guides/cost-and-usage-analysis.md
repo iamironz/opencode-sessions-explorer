@@ -8,7 +8,7 @@ recurring failures and repeated prompts.
 ## Mental Model
 
 All four tools aggregate the `session` and `part` tables directly — no export tree
-or `ck` index required. Pick the tool by the shape of the answer you want:
+or `ck` required. Pick the tool by the shape of the answer you want:
 
 - **Spend by dimension** — `cost-by-project` groups by project, directory, agent, or
   model.

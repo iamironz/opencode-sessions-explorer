@@ -1,7 +1,7 @@
 import { tool } from "@opencode-ai/plugin"
 import { stmt } from "../lib/db.js"
 import { runWithEnvelope, fail } from "../lib/envelope.js"
-import { runCk, ckIndexFreshness, type CkIndexFreshness, type CkIndexStatus, type CkScopeCoverage } from "../lib/ck.js"
+import { runCk, type CkScopeCoverage } from "../lib/ck.js"
 import { channelExportComplete, runExport, exportRoot } from "../lib/export.js"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
@@ -20,12 +20,11 @@ export const searchText = tool({
     "CRITICAL ARG `role` (default 'any'): which message roles to search inside. **Default to 'any'** for natural-language questions like \"where did I mention X\", \"find sessions about Y\", \"did I discuss Z\" — these are asking about appearances ANYWHERE in your conversations (user prompts AND assistant text AND tool I/O AND reasoning). " +
     "Only set role='user' when the user EXPLICITLY narrows to authored messages: \"what prompts have I typed containing X\", \"my user-authored messages mentioning Y\", \"questions I sent OpenCode with Z\". Phrases like \"did I mention\" / \"in my history\" / \"have I discussed\" do NOT imply role='user' — those are asking about the corpus as a whole. " +
     "Only set role='assistant' for questions explicitly about what the AI said (\"what has the assistant said about X\"). " +
-    "Modes: 'regex' (default — drop-in grep, no index needed), 'sem' (semantic embeddings, lets ck lazily build/refresh its index), 'hybrid' (regex + sem). " +
+    "Uses regex search. " +
     "Pre-filter cross-session searches via session_ids[], project_id, agent, since_ms/until_ms — unscoped full-corpus search can take 10-30 seconds. Scoped searches return in <1s. " +
     "For grep INSIDE a single known session use grep-session instead (faster, narrower).",
   args: {
-    q: tool.schema.string().describe("Search query (regex pattern or natural-language query depending on mode)"),
-    mode: tool.schema.enum(["regex", "sem", "hybrid"]).default("regex"),
+    q: tool.schema.string().describe("Search query (regex pattern)"),
     surface: tool.schema.enum(["recall", "debug_trace", "tool_audit", "code", "forensics"]).default("recall").describe("Retrieval preset. recall is curated/default; forensics searches raw replay data."),
     channels: tool.schema.array(tool.schema.enum(CHANNELS)).optional().describe("Override surface-derived channels. Use raw for current full-fidelity behavior."),
     group_by_session: tool.schema.boolean().optional().describe("If true, return one entry per matching session with evidence snippets instead of one entry per part. Defaults true for unscoped recall and false for scoped/forensic searches."),
@@ -37,7 +36,6 @@ export const searchText = tool({
     until_ms: tool.schema.number().int().nonnegative().optional(),
     archived: tool.schema.enum(["no", "only", "any"]).default("any"),
     limit: tool.schema.number().int().min(1).max(50).default(20).describe("Max RESULTS (hits or sessions depending on group_by_session)"),
-    threshold: tool.schema.number().min(0).max(1).optional().describe("Only for sem/hybrid: min score"),
     fixed_string: tool.schema.boolean().default(false),
     case_sensitive: tool.schema.boolean().default(false),
     timeout_ms: tool.schema.number().int().min(1000).max(60000).default(20000),
@@ -45,28 +43,25 @@ export const searchText = tool({
   },
   async execute(args) {
     return runWithEnvelope("search_text", 160, async (ctx) => {
-      const runtimeMode: unknown = args.mode
-      if (runtimeMode !== undefined && runtimeMode !== "regex" && runtimeMode !== "sem" && runtimeMode !== "hybrid") {
-        fail("BAD_ARGS", `unsupported search mode: ${String(runtimeMode)}`, "Use regex, sem, or hybrid.")
+      if ("mode" in (args as object)) {
+        fail("BAD_ARGS", "mode is not supported by search-text", "Remove mode; search-text always uses regex.")
       }
       const surface = inferSurface(args.q, args.surface as SearchSurface)
       const channels = normalizeChannels(args.channels?.length ? args.channels : channelsForSurface(surface, args.q))
       const groupBySession = args.group_by_session ?? (surface !== "forensics" && !args.session_ids?.length)
 
-      // Pre-filter scope: resolve to a list of session_ids in DB.
       const scopeIds = resolveScope(args)
       const root = exportRoot()
       if (scopeIds !== "all" && scopeIds.length === 0) {
         return groupBySession
-          ? { sessions: table([]), hits_total: 0, mode: args.mode, surface, channels, scope_session_count: 0, ck_duration_ms: 0, suppressed: emptySuppressed(channels) }
-          : { hits: table([]), mode: args.mode, scope_session_count: 0, ck_duration_ms: 0 }
+          ? { sessions: table([]), hits_total: 0, mode: "regex", surface, channels, scope_session_count: 0, ck_duration_ms: 0, suppressed: emptySuppressed(channels) }
+          : { hits: table([]), mode: "regex", scope_session_count: 0, ck_duration_ms: 0 }
       }
 
       if (scopeIds === "all" && (surface === "forensics" || channels.includes("raw"))) {
         ctx.warnings.push("raw unscoped forensic search can take 10-30s. Add session_ids/project_id/agent/since_ms to narrow.")
       }
 
-      // Delta-sync (best-effort)
       let exportStatus: "fresh" | "stale" = "fresh"
       try {
         exportStatus = applyExportProgress(ctx, await runExport({ budgetMs: 4000 }))
@@ -80,29 +75,20 @@ export const searchText = tool({
       if (scopeIds !== "all" && scopes.length === 0) {
         ctx.warnings.push(`export scope missing after delta sync for ${scopeIds.length} DB session(s); returning empty results from stale/partial export data.`)
         return groupBySession
-          ? { sessions: table([]), hits_total: 0, mode: args.mode, surface, channels, scope_session_count: scopeIds.length, ck_duration_ms: 0, suppressed: emptySuppressed(channels) }
-          : { hits: table([]), mode: args.mode, scope_session_count: scopeIds.length, ck_duration_ms: 0 }
+          ? { sessions: table([]), hits_total: 0, mode: "regex", surface, channels, scope_session_count: scopeIds.length, ck_duration_ms: 0, suppressed: emptySuppressed(channels) }
+          : { hits: table([]), mode: "regex", scope_session_count: scopeIds.length, ck_duration_ms: 0 }
       }
 
-      // For sem/hybrid, check index presence but still call ck in the requested
-      // mode so ck's own lazy auto-indexing can run during normal search.
-      let effectiveMode = args.mode
-      let preSearchFreshness: CkIndexFreshness | null = null
-      if (args.mode === "sem" || args.mode === "hybrid") {
-        preSearchFreshness = await ckIndexFreshness(root)
-        ctx.indexStatus = combineExportAndCkStatus(exportStatus, preSearchFreshness.status)
-      }
-      if (!ctx.mode) ctx.mode = effectiveMode
+      if (!ctx.mode) ctx.mode = "regex"
+      ctx.indexStatus = exportStatus
 
       // When group_by_session is true, fetch MORE hits so each session's hit_count is accurate.
       // The cap on output size is bounded by `limit` (number of SESSIONS); ck may return many parts per session.
       const ckTopk = groupBySession
         ? Math.min(Math.max(args.limit * 20, 100), 500)
-        : Math.min(args.limit * (effectiveMode === "regex" ? 2 : 3), 150)
+        : Math.min(args.limit * 2, 150)
 
-      const result = await runWithCk(args, scopes, effectiveMode, ctx, scopeIds === "all" ? null : scopeIds.length, ckTopk, channels, surface, groupBySession)
-      if (preSearchFreshness) await refreshCkStatusAfterSearch(ctx, root, exportStatus, preSearchFreshness)
-      return result
+      return runWithCk(args, scopes, ctx, scopeIds === "all" ? null : scopeIds.length, ckTopk, channels, surface, groupBySession)
     })
   },
 })
@@ -174,13 +160,11 @@ function emptySuppressed(channels: SearchChannel[]) {
   return { duplicate_hits: 0, omitted_channels: CHANNELS.filter((c) => !channels.includes(c) && c !== "raw") }
 }
 
-async function runWithCk(args: any, scopes: string[], mode: "regex" | "sem" | "hybrid", ctx: any, sessionCount: number | null, topk: number, channels: SearchChannel[], surface: SearchSurface, groupBySession: boolean) {
+async function runWithCk(args: any, scopes: string[], ctx: any, sessionCount: number | null, topk: number, channels: SearchChannel[], surface: SearchSurface, groupBySession: boolean) {
   const ck = await runCk({
-    mode,
     query: args.q,
     scopes,
     topk,
-    threshold: args.threshold,
     caseSensitive: args.case_sensitive,
     fixedString: args.fixed_string,
     timeoutMs: args.timeout_ms,
@@ -241,7 +225,7 @@ async function runWithCk(args: any, scopes: string[], mode: "regex" | "sem" | "h
       line_start: p.ck.span?.line_start ?? null,
       line_end: p.ck.span?.line_end ?? null,
       snippet: truncateString(snippet, 400).value,
-      source: mode,
+      source: "regex",
       raw_ref: p.partId
         ? { tool: "opencode-sessions-explorer-get-part", part_id: p.partId }
         : p.channel === "session-summary" && p.sessionId
@@ -341,7 +325,7 @@ async function runWithCk(args: any, scopes: string[], mode: "regex" | "sem" | "h
     return {
       sessions: table(sessions, { dict: ["agent", "model", "directory", "project_id", "sample_role"] }),
       hits_total: roleFiltered.length,
-      mode,
+      mode: "regex",
       surface,
       channels,
       scope_session_count: sessionCount,
@@ -371,7 +355,7 @@ async function runWithCk(args: any, scopes: string[], mode: "regex" | "sem" | "h
   return {
     hits: table(flatHits, { dict: ["channel", "role", "source", "session_id", "part_type"] }),
     session_meta: sessionMeta,
-    mode,
+    mode: "regex",
     surface,
     channels,
     scope_session_count: sessionCount,
@@ -380,25 +364,6 @@ async function runWithCk(args: any, scopes: string[], mode: "regex" | "sem" | "h
     ck_scope_coverage: ck.scopeCoverage,
     role_filter: args.role,
     suppressed: { ...emptySuppressed(channels), duplicate_hits: duplicateCount },
-  }
-}
-
-function combineExportAndCkStatus(exportStatus: "fresh" | "stale", ckStatus: CkIndexStatus): CkIndexStatus {
-  if (ckStatus === "missing" || ckStatus === "partial") return ckStatus
-  if (exportStatus === "stale") return "stale"
-  return ckStatus
-}
-
-async function refreshCkStatusAfterSearch(ctx: any, root: string, exportStatus: "fresh" | "stale", preSearchFreshness: CkIndexFreshness): Promise<void> {
-  try {
-    const postSearchFreshness = await ckIndexFreshness(root)
-    ctx.indexStatus = combineExportAndCkStatus(exportStatus, postSearchFreshness.status)
-    if (postSearchFreshness.status !== "fresh") {
-      ctx.warnings.push(postSearchFreshness.warning ?? preSearchFreshness.warning ?? "ck semantic index freshness is not verified after search; results may be partial.")
-    }
-  } catch (e) {
-    ctx.indexStatus = combineExportAndCkStatus(exportStatus, preSearchFreshness.status)
-    ctx.warnings.push(preSearchFreshness.warning ?? `ck semantic index freshness recheck failed after search: ${(e as Error).message}`)
   }
 }
 

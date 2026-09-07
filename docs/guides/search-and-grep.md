@@ -10,9 +10,8 @@ known session, and audit individual tool invocations by name, status, or substri
 - `search-text` is the canonical "where in my history did X happen?" tool. Its
   default surface is `recall`: session-first, channel-aware, and evidence-limited,
   searching high-signal conversation and session-summary views before raw replay.
-- The default `search-text` mode is `regex` (a drop-in grep that needs no index and
-  always works). `sem` and `hybrid` add semantic embeddings. `grep-session` uses
-  regex search without a mode argument.
+- Both `search-text` and `grep-session` are regex-only; neither exposes a `mode`
+  argument.
 - The default `role` is `any`. Natural-language questions like "where did I mention
   X" or "have I discussed Y" ask about appearances anywhere in the corpus — only set
   `role:'user'` when the question is explicitly about prompts you authored.
@@ -24,20 +23,16 @@ known session, and audit individual tool invocations by name, status, or substri
 ### The `ck` Dependency
 
 `search-text` and `grep-session` shell out to the optional [`ck`](https://github.com/BeaconBay/ck)
-CLI over the filesystem export tree. If `ck` is not installed, both return
-`CK_NOT_FOUND` cleanly; the other 16 tools keep working without it. Semantic
-`search-text` searches invoke `ck` in the requested mode so `ck` can lazily build or
-refresh its own index during the search. Explicit `ck --index .` or
-`ck --reindex .` runs from the export root are optional prewarm/troubleshooting
-steps, not required before first use. If an index is missing, stale, or partially
-verified, the tools warn that the first/lazy-refresh run may be slow or partial. See
-[search surfaces](../reference/search-surfaces.md) for the surface/channel model.
+CLI as a stateless regex scanner over the filesystem export tree. If `ck` is not
+installed, both return `CK_NOT_FOUND` cleanly; the other 16 tools keep working
+without it. See [search surfaces](../reference/search-surfaces.md) for the
+surface/channel model.
 
 ## Controls
 
 | Tool | Use It For | Key Args |
 | --- | --- | --- |
-| `search-text` | Cross-session content search across all bodies (prompts, responses, tool I/O, reasoning, patches) | `q`, `mode` (`regex`/`sem`/`hybrid`), `surface`, `channels`, `group_by_session`, `role`, `session_ids`, `project_id`, `agent`, `since_ms`/`until_ms`, `archived`, `limit`, `redact` |
+| `search-text` | Cross-session regex content search across all bodies (prompts, responses, tool I/O, reasoning, patches) | `q`, `surface`, `channels`, `group_by_session`, `role`, `session_ids`, `project_id`, `agent`, `since_ms`/`until_ms`, `archived`, `limit`, `redact` |
 | `grep-session` | Fast regex search inside one known session | `session_id`, `pattern`, `surface`, `channels`, `fixed_string`, `case_sensitive`, `whole_word`, `context_lines`, `limit`, `redact` |
 | `search-tool-calls` | Find tool invocations by name, status, or input/output/error substring | `tool` (exact or `LIKE` wildcard), `status`, `input_like`, `output_like`, `error_like`, `session_id`, `project_id`, `since_ms`/`until_ms`, `archived`, `limit`, `cursor` |
 

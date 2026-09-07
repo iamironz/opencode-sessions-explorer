@@ -32,7 +32,7 @@ if (!process.env.OPENCODE_SESSIONS_EXPLORER_LIVE) {
   process.env.OPENCODE_SESSIONS_EXPLORER_EXPORT_ROOT = exportRoot
   process.env.OPENCODE_SESSIONS_EXPLORER_TOOL_OUTPUT_DIR = toolOutputDir
   // Point ck at a non-existent path; combined with skipIf-gating of ck-dependent
-  // probes, this keeps the hermetic suite from shelling out to the real ck index.
+  // probes, this keeps the hermetic suite from shelling out to a real ck binary.
   process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN = join(base, "no-such-ck-binary")
 
   mkdirSync(exportRoot, { recursive: true })

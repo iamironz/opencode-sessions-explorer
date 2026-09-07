@@ -18,8 +18,8 @@ Two commands cover the health of every layer the plugin depends on.
    ```
 
    This reports database reachability, schema head and drift, SQLite `json1`,
-   `busy_timeout`, export tree presence, curated channel views, `ck` CLI, `ck`
-   index, and the tool-output directory. Add `--json` for machine-readable output.
+   `busy_timeout`, export tree presence, curated channel views, `ck` CLI, and
+   the tool-output directory. Add `--json` for machine-readable output.
 
 2. Probe the database from inside OpenCode with the `db-stats` tool. It returns the
    migration head, table counts, json1 status, `busy_timeout`, and any schema-drift

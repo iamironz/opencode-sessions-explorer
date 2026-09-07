@@ -13,7 +13,7 @@ four-layer pipeline:
 ```text
 SQLite DB (read-only source of truth)
   -> filesystem export tree (~/.local/share/opencode-sessions-explorer; by-session + by-channel)
-  -> ck semantic index (.ck/; optional)
+  -> ck regex scan (stateless; optional)
   -> enriched response (re-fetches session/part metadata from SQLite per hit)
 ```
 
@@ -36,7 +36,7 @@ maintenance.
 | --- | --- | --- |
 | `opencode-sessions-explorer-bulk-export` | Build or resume the export tree | Idempotent and resumable via `.last_sync`; `--reset` starts from scratch and rebuilds curated `by-channel/` views; `--root <path>` targets a non-default export root |
 | `opencode-sessions-explorer-dedupe-export` | Remove duplicate part files from an older cursor-migration bug | Dry-run by default (reports only); pass `--apply` to actually delete, keeping the lowest-seq file per part |
-| `opencode-sessions-explorer-check-deps` | Probe install health | Checks DB, schema/drift, SQLite `json1`, `busy_timeout`, export tree, channel views, `ck` CLI, `ck` index, and tool-output dir; `--json` for machine output; exit codes `0` ok, `1` soft warning, `2` hard fail |
+| `opencode-sessions-explorer-check-deps` | Probe install health | Checks DB, schema/drift, SQLite `json1`, `busy_timeout`, export tree, channel views, `ck` CLI, and tool-output dir; `--json` for machine output; exit codes `0` ok, `1` soft warning, `2` hard fail |
 | `db-stats` (tool) | Inspect database health from inside OpenCode | Returns migration head, table counts, json1 status, `busy_timeout`, and schema-drift warnings |
 
 ## Recommended Flow
@@ -52,18 +52,6 @@ maintenance.
 
    ```bash
    bunx opencode-sessions-explorer-bulk-export --reset
-   ```
-
-1. (Optional) Prewarm the `ck` index. Semantic `search-text` searches invoke `ck` in
-   the requested mode so `ck` can lazily build or refresh the index during the
-   search. Run these commands only to avoid
-   first-search latency or to troubleshoot stale/partial coverage warnings, and run
-   them from the export root, not from the repository checkout:
-
-   ```bash
-   cd ~/.local/share/opencode-sessions-explorer
-   ck --index .  # optional prewarm in the export root
-   ck --reindex .  # optional troubleshooting refresh
    ```
 
 1. Verify everything is wired up, and re-run after any OpenCode upgrade:

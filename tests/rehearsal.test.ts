@@ -611,12 +611,10 @@ describe.skipIf(!LIVE)("search_text", () => {
     expect(r.data.hits.length).toBeLessThanOrEqual(5)
     expect(r.meta.bytes_returned).toBeLessThan(160 * 1024)
   }, 30000)
-  test("TX-M sem mode stays semantic so ck can lazy-index", async () => {
-    const r = await runTool(searchText, { q: "review", mode: "sem", session_ids: [F.sessions.active], limit: 3 })
+  test("TX-M search-text always reports regex mode", async () => {
+    const r = await runTool(searchText, { q: "review", session_ids: [F.sessions.active], limit: 3 })
     expect(r.ok).toBe(true)
-    const warns = (r.warnings ?? []).join(" ")
-    expect(r.meta.mode).toBe("sem")
-    expect(warns).not.toContain("falling back to regex")
+    expect(r.meta.mode).toBe("regex")
   }, 30000)
   test("TX-S nonexistent session scope → empty", async () => {
     const r = await runTool(searchText, { q: "anything", session_ids: [F.sessions.missing], limit: 3 })
@@ -632,12 +630,10 @@ describe.skipIf(!LIVE)("search_text", () => {
   }, 40000)
 })
 
-// --- Phase 5 reindex probes — Layer-2 (filesystem export) update propagation ---
 import { runExport, getSyncState, _resetExportCacheForTest, exportRoot } from "../src/lib/export.ts"
 import { readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs"
 import { join } from "node:path"
-// Export-propagation over a fully materialized tree → live corpus only.
-describe.skipIf(!LIVE)("L2 reindex (export update propagation)", () => {
+describe.skipIf(!LIVE)("L2 export update propagation", () => {
   test("RX-H .last_sync uses v3 schema (id + session cursor state)", () => {
     const root = exportRoot()
     const p = join(root, ".last_sync")

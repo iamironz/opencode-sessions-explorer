@@ -2,8 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { z } from "zod"
-import { ckIndexFreshness, runCk } from "../src/lib/ck.ts"
+import { runCk } from "../src/lib/ck.ts"
 import { _resetExportCacheForTest, exportRoot, setSyncState } from "../src/lib/export.ts"
 import { _resetBackgroundReconcileForTest } from "../src/lib/export-background.ts"
 import { acquireExportLock } from "../src/lib/export-lock.ts"
@@ -19,33 +18,28 @@ afterEach(() => {
   else process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN = originalCkBin
 })
 
-describe("ck helper freshness and coverage", () => {
-  test("search-text mode schema accepts only regex, sem, and hybrid", () => {
-    const schema = z.object(searchText.args)
-
-    for (const mode of ["regex", "sem", "hybrid"]) {
-      expect(schema.safeParse({ q: "needle", mode }).success).toBe(true)
-    }
-    expect(schema.safeParse({ q: "needle", mode: "lex" }).success).toBe(false)
+describe("ck regex scan and coverage", () => {
+  test("search-text exposes regex search without a mode argument", () => {
+    expect("mode" in searchText.args).toBe(false)
   })
 
   test("grep-session exposes regex search without a mode argument", () => {
     expect("mode" in grepSession.args).toBe(false)
   })
 
-  test("search-text rejects removed lex mode before launching ck when schema parsing is bypassed", async () => {
+  test("search-text rejects any mode before launching ck when schema parsing is bypassed", async () => {
     const root = tempRoot()
     const argsLog = join(root, "ck-args.log")
     process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN = writeFakeCk(root, { argsLog })
 
-    const env = await runToolWithoutSchema(searchText, { q: "needle", mode: "lex" })
+    const env = await runToolWithoutSchema(searchText, { q: "needle", mode: "sem" })
 
     expect(env.ok).toBe(false)
     expect(env.error?.code).toBe("BAD_ARGS")
     expect(existsSync(argsLog)).toBe(false)
   })
 
-  test("grep-session rejects removed mode before launching ck when schema parsing is bypassed", async () => {
+  test("grep-session rejects any mode before launching ck when schema parsing is bypassed", async () => {
     const root = tempRoot()
     const argsLog = join(root, "ck-args.log")
     process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN = writeFakeCk(root, { argsLog })
@@ -53,43 +47,12 @@ describe("ck helper freshness and coverage", () => {
     const env = await runToolWithoutSchema(grepSession, {
       session_id: F.sessions.active,
       pattern: "needle",
-      mode: "lex",
+      mode: "sem",
     })
 
     expect(env.ok).toBe(false)
     expect(env.error?.code).toBe("BAD_ARGS")
     expect(existsSync(argsLog)).toBe(false)
-  })
-
-  test("status-json unavailable degrades manifest freshness to partial", async () => {
-    const root = tempRoot()
-    writeMarker(root)
-    writeManifest(root, { index_updated: Date.now() + 60_000, totals: { embedded_chunks: 10 } })
-    process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN = join(root, "missing-ck")
-
-    const status = await ckIndexFreshness(root, 100)
-
-    expect(status.present).toBe(true)
-    expect(status.status_json_available).toBe(false)
-    expect(status.status).toBe("partial")
-    expect(status.warning).toContain("ck --reindex")
-    expect(status.warning).toContain("ck --index")
-  })
-
-  test("status-json can attest a fresh semantic index", async () => {
-    const root = tempRoot()
-    writeMarker(root)
-    writeManifest(root, { index_updated: Date.now(), totals: { embedded_chunks: 1 } })
-    process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN = writeFakeCk(root, {
-      statusJson: { status: "fresh", index_updated: Date.now() + 60_000, totals: { embedded_chunks: 42 } },
-    })
-
-    const status = await ckIndexFreshness(root, 1000)
-
-    expect(status.status_json_available).toBe(true)
-    expect(status.status).toBe("fresh")
-    expect(status.embedded_chunks).toBe(42)
-    expect(status.warning).toBeNull()
   })
 
   test("multi-scope fanout reports truncated coverage on timeout", async () => {
@@ -100,7 +63,7 @@ describe("ck helper freshness and coverage", () => {
     mkdirSync(scopeB, { recursive: true })
     process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN = writeFakeCk(root, { sleepSeconds: "0.2" })
 
-    const result = await runCk({ mode: "regex", query: "needle", scopes: [scopeA, scopeB], timeoutMs: 50 })
+    const result = await runCk({ query: "needle", scopes: [scopeA, scopeB], timeoutMs: 50 })
 
     expect(result.scopeCoverage.strategy).toBe("fanout")
     expect(result.scopeCoverage.total_scopes).toBe(2)
@@ -119,7 +82,6 @@ describe("ck helper freshness and coverage", () => {
 
       const env = await runTool(searchText, {
         q: "review",
-        mode: "regex",
         surface: "forensics",
         session_ids: [F.sessions.active, F.sessions.archived],
         limit: 3,
@@ -140,7 +102,6 @@ describe("ck helper freshness and coverage", () => {
 
       const env = await runTool(searchText, {
         q: "big patch",
-        mode: "regex",
         surface: "forensics",
         session_ids: [sessionId],
         limit: 3,
@@ -155,44 +116,35 @@ describe("ck helper freshness and coverage", () => {
     }))
   })
 
-  for (const mode of ["regex", "sem", "hybrid"] as const) {
-    test(`search-text constructs ck arguments for ${mode} mode`, async () => {
-      await withTempExportRoot(async () => withFakeBackgroundWorker(async () => {
-        const fakeRoot = tempRoot()
-        const argsLog = join(fakeRoot, "ck-args.log")
-        process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN = writeFakeCk(fakeRoot, { argsLog })
+  test("search-text constructs regex ck arguments", async () => {
+    await withTempExportRoot(async () => withFakeBackgroundWorker(async () => {
+      const fakeRoot = tempRoot()
+      const argsLog = join(fakeRoot, "ck-args.log")
+      process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN = writeFakeCk(fakeRoot, { argsLog })
 
-        const env = await runTool(searchText, {
-          q: "needle",
-          mode,
-          surface: "forensics",
-          channels: ["raw"],
-          session_ids: [F.sessions.active],
-          limit: 3,
-          timeout_ms: 1000,
-        })
+      const env = await runTool(searchText, {
+        q: "needle",
+        surface: "forensics",
+        channels: ["raw"],
+        session_ids: [F.sessions.active],
+        limit: 3,
+        timeout_ms: 1000,
+      })
 
-        const ckInvocations = readFileSync(argsLog, "utf8").trim().split("\n")
-        const searchInvocation = ckInvocations.find((invocation) => invocation.includes("needle"))
-        const searchArgs = searchInvocation?.split(/\s+/) ?? []
-        expect(env.ok).toBe(true)
-        expect(env.data.mode).toBe(mode)
-        expect(env.meta.mode).toBe(mode)
-        expect(searchInvocation).toBeDefined()
-        expect(searchArgs).toContain(`--${mode}`)
-        expect(searchArgs).not.toContain("--lex")
-        if (mode !== "regex") {
-          expect(env.meta.index_status).toBe("missing")
-          expect(searchArgs).not.toContain("--regex")
-          const warnings = (env.warnings ?? []).join(" ")
-          expect(warnings).toContain("lazily create or update")
-          expect(warnings).not.toContain("falling back to regex")
-        }
-      }))
-    })
-  }
+      const ckInvocations = readFileSync(argsLog, "utf8").trim().split("\n")
+      const searchInvocation = ckInvocations.find((invocation) => invocation.includes("needle"))
+      const searchArgs = searchInvocation?.split(/\s+/) ?? []
+      expect(env.ok).toBe(true)
+      expect(env.data.mode).toBe("regex")
+      expect(env.meta.mode).toBe("regex")
+      expect(searchInvocation).toBeDefined()
+      expect(searchArgs).toContain("--regex")
+      expect(searchArgs).not.toContain("--sem")
+      expect(searchArgs).not.toContain("--hybrid")
+    }))
+  })
 
-  test("grep-session constructs ck arguments for regex mode", async () => {
+  test("grep-session constructs regex ck arguments", async () => {
     await withTempExportRoot(async () => withFakeBackgroundWorker(async () => {
       const fakeRoot = tempRoot()
       const argsLog = join(fakeRoot, "ck-args.log")
@@ -211,30 +163,8 @@ describe("ck helper freshness and coverage", () => {
       expect(env.ok).toBe(true)
       expect(env.data.mode).toBe("regex")
       expect(ckArgs).toContain("--regex")
-      expect(ckArgs).not.toContain("--lex")
-    }))
-  })
-
-  test("search-text rechecks ck status after lazy semantic indexing", async () => {
-    await withTempExportRoot(async (root) => withFakeBackgroundWorker(async () => {
-      const fakeRoot = tempRoot()
-      process.env.OPENCODE_SESSIONS_EXPLORER_CK_BIN = writeFakeCk(fakeRoot, { lazyManifestRoot: root })
-
-      const env = await runTool(searchText, {
-        q: "needle",
-        mode: "sem",
-        surface: "forensics",
-        channels: ["raw"],
-        session_ids: [F.sessions.active],
-        limit: 3,
-        timeout_ms: 1000,
-      })
-
-      expect(env.ok).toBe(true)
-      expect(env.data.mode).toBe("sem")
-      expect(env.meta.mode).toBe("sem")
-      expect(env.meta.index_status).toBe("fresh")
-      expect((env.warnings ?? []).join(" ")).not.toContain("semantic index is missing")
+      expect(ckArgs).not.toContain("--sem")
+      expect(ckArgs).not.toContain("--hybrid")
     }))
   })
 
@@ -254,7 +184,6 @@ describe("ck helper freshness and coverage", () => {
 
       const env = await runTool(searchText, {
         q: "big patch",
-        mode: "regex",
         surface: "forensics",
         session_ids: [F.sessions.big_part],
         limit: 3,
@@ -279,7 +208,6 @@ describe("ck helper freshness and coverage", () => {
       try {
         const env = await runTool(searchText, {
           q: "review",
-          mode: "regex",
           surface: "forensics",
           session_ids: [F.sessions.active],
           limit: 3,
@@ -331,38 +259,14 @@ async function runToolWithoutSchema(def: any, args: Record<string, unknown>): Pr
   return JSON.parse(json)
 }
 
-function writeMarker(root: string): void {
-  mkdirSync(root, { recursive: true })
-  writeFileSync(join(root, ".last_sync"), "v2 1:prt_marker")
-}
-
-function writeManifest(root: string, value: unknown): void {
-  const dir = join(root, ".ck")
-  mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, "manifest.json"), JSON.stringify(value))
-}
-
-function writeFakeCk(root: string, opts: { statusJson?: unknown; sleepSeconds?: string; argsLog?: string; lazyManifestRoot?: string }): string {
+function writeFakeCk(root: string, opts: { sleepSeconds?: string; argsLog?: string }): string {
   const path = join(root, "fake-ck")
-  const statusJson = JSON.stringify(
-    opts.statusJson ?? { status: "fresh", index_updated: Date.now() + 60_000, totals: { embedded_chunks: 1 } },
-  )
   const sleep = opts.sleepSeconds ?? "0"
   const argsLog = opts.argsLog ?? ""
-  const lazyManifestRoot = opts.lazyManifestRoot ?? ""
   writeFileSync(path, `#!/usr/bin/env bash
 args_log=${JSON.stringify(argsLog)}
-lazy_manifest_root=${JSON.stringify(lazyManifestRoot)}
 if [[ -n "$args_log" ]]; then
   printf '%s\n' "$*" >> "$args_log"
-fi
-if [[ "$1" == "--status-json" ]]; then
-  printf '%s\n' '${statusJson}'
-  exit 0
-fi
-if [[ -n "$lazy_manifest_root" ]]; then
-  mkdir -p "$lazy_manifest_root/.ck"
-  printf '%s\n' '${statusJson}' > "$lazy_manifest_root/.ck/manifest.json"
 fi
 sleep ${sleep}
 scope="\${@: -1}"

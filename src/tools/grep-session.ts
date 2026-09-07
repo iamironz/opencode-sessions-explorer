@@ -16,7 +16,7 @@ export const grepSession = tool({
     "Operates only on the filesystem export of one session's parts (~50-500 files) so it's fast (<200ms typical). Auto delta-syncs any new parts since the last call. " +
     "Default surface is `recall`, searching curated conversation/session-summary channels when available. Use `surface:'forensics'` or channels:['raw'] to search raw exported bodies including tool output and reasoning. " +
     "Uses regex search. Supports fixed_string (literal match, no regex special chars), case_sensitive, whole_word, context_lines (lines before/after match). " +
-    "For CROSS-SESSION content search (across ALL your OpenCode sessions) use search-text instead — that one supports group_by_session, role filter, and semantic modes.",
+    "For CROSS-SESSION content search (across ALL your OpenCode sessions) use search-text instead — that one supports group_by_session and role filter.",
   args: {
     session_id: tool.schema.string().describe("Session ID"),
     pattern: tool.schema.string().describe("Pattern (regex by default unless fixed_string=true)"),
@@ -56,7 +56,6 @@ export const grepSession = tool({
       if (scopes.length === 0) fail("INDEX_MISSING", `session not in export tree (may be very new): ${args.session_id}`, "Run delta-sync or bulk-export.")
 
       const ck = await runCk({
-        mode: "regex",
         query: args.pattern,
         scopes,
         topk: args.limit,

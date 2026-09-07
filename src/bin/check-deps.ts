@@ -1,32 +1,11 @@
 #!/usr/bin/env bun
-/**
- * check-deps — diagnostic CLI for `opencode-sessions-explorer` plugin install health.
- *
- * Probes:
- *   - OpenCode SQLite DB reachable
- *   - json1 extension available
- *   - busy_timeout honoured
- *   - schema head + drift
- *   - Sessions-export tree present + size
- *   - ck binary present + version + index status
- *   - Disk space
- *
- * Exit codes:
- *   0 — all green
- *   1 — soft warning (plugin works, but some optional pieces missing)
- *   2 — hard fail (plugin won't work)
- *
- * Usage:
- *   opencode-sessions-explorer-check-deps
- *   opencode-sessions-explorer-check-deps --json   # machine-readable
- */
 import { spawnSync } from "node:child_process"
 import { existsSync, readdirSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { locateDb } from "../lib/db.js"
 import { getSchemaState } from "../lib/schema.js"
 import { channelExportComplete, exportRoot } from "../lib/export.js"
-import { locateCk, ckIndexPresent } from "../lib/ck.js"
+import { locateCk } from "../lib/ck.js"
 
 const json = process.argv.includes("--json")
 type Status = "ok" | "warn" | "fail"
@@ -37,7 +16,6 @@ function pass(name: string, detail: string) { checks.push({ name, status: "ok", 
 function warn(name: string, detail: string, fix?: string) { checks.push({ name, status: "warn", detail, fix }) }
 function fail(name: string, detail: string, fix?: string) { checks.push({ name, status: "fail", detail, fix }) }
 
-// 1. DB reachable
 let dbPath: string | null = null
 try {
   dbPath = locateDb()
@@ -46,7 +24,6 @@ try {
   fail("OpenCode DB", (e as Error).message, "Set $OPENCODE_SESSIONS_EXPLORER_DB to the absolute path of opencode.db, or install OpenCode and run it at least once.")
 }
 
-// 2. Schema state (only if DB reachable)
 if (dbPath) {
   try {
     const s = getSchemaState()
@@ -66,7 +43,6 @@ if (dbPath) {
   }
 }
 
-// 3. Export tree
 const root = exportRoot()
 if (existsSync(root)) {
   const bySession = join(root, "by-session")
@@ -88,19 +64,12 @@ if (existsSync(root)) {
   warn("Export tree", `${root} not yet built`, "Run `opencode-sessions-explorer-bulk-export` to populate. Text search will return empty until then.")
 }
 
-// 4. ck binary
 try {
   const ckBin = locateCk()
   const r = spawnSync(ckBin, ["--version"], { encoding: "utf8" })
   if (r.status === 0) {
     const ver = (r.stdout ?? "").trim()
     pass("ck CLI", `${ckBin} (${ver})`)
-    // ck index status
-    if (existsSync(root)) {
-      const idx = ckIndexPresent(root)
-      if (idx.present) pass("ck index", idx.embedded_chunks != null ? `present (${idx.embedded_chunks} embedded chunks)` : "present")
-      else warn("ck index", "not built", "Semantic search will ask ck to lazily build the index; optionally prewarm with `cd " + root + " && ck --index .`.")
-    }
   } else {
     warn("ck CLI", `${ckBin} returned ${r.status}: ${(r.stderr ?? "").slice(0, 120)}`, "Reinstall via `cargo install ck-search`.")
   }
@@ -108,7 +77,6 @@ try {
   warn("ck CLI", "not found in $PATH or common locations", "Install with `cargo install ck-search` for search-text + grep-session tools. Other 16 tools work without ck.")
 }
 
-// 5. tool-output dir (for get-part dereference)
 const toolOutputDir = (() => {
   if (process.env.OPENCODE_SESSIONS_EXPLORER_TOOL_OUTPUT_DIR) return process.env.OPENCODE_SESSIONS_EXPLORER_TOOL_OUTPUT_DIR
   const home = process.env.HOME ?? ""
@@ -117,7 +85,6 @@ const toolOutputDir = (() => {
 if (existsSync(toolOutputDir)) pass("tool-output dir", toolOutputDir)
 else warn("tool-output dir", `${toolOutputDir} not yet created`, "Will be auto-created by OpenCode when needed.")
 
-// Print
 const okCount = checks.filter((c) => c.status === "ok").length
 const warnCount = checks.filter((c) => c.status === "warn").length
 const failCount = checks.filter((c) => c.status === "fail").length

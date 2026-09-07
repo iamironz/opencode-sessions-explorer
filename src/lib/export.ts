@@ -1,22 +1,3 @@
-/**
- * Filesystem export of searchable session content, for `ck` indexing.
- *
- * Layout:
- *   <root>/by-session/<ses_id>/
- *     meta.json
- *     <NNNN>-<prt_id>.txt   (one per searchable part)
- *   <root>/by-channel/<channel>/by-session/<ses_id>/
- *     <NNNN>-<prt_id>.txt   (derived curated search views)
- *   <root>/.last_sync       (v3 JSON sync state)
- *
- * `ck` is point-and-shoot — it walks the tree, indexes text files,
- * ignores the meta.json (per its default .ckignore which excludes JSON).
- *
- * Per-part body cap: 256 KB. Truncated with a marker pointing back at
- * get_part(prt_id).
- *
- * Atomic writes: temp file + rename. Dotfile-prefix marks in-flight.
- */
 import { stmt } from "./db.js"
 import { decodePart, decodeModel, type DecodedPart } from "./decode.js"
 import { mkdirSync, existsSync, renameSync, writeFileSync, unlinkSync, readdirSync } from "node:fs"

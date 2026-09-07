@@ -8,9 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Removed
-- Removed the `lex` mode from `search-text` and `grep-session`. `search-text` now
-  exposes `regex`, `sem`, and `hybrid`; `grep-session` uses regex only and no longer
-  has a `mode` argument.
+- Removed the `lex` mode from `search-text` and `grep-session`.
+- Removed `sem` and `hybrid` search modes. `search-text` and `grep-session` are now
+  regex-only and expose no `mode` argument; `ck` is invoked purely as a stateless
+  regex scanner, with no semantic index build/refresh/status behavior.
 
 ### Added
 - MCP stdio entry point (`dist/mcp.js`, bin `opencode-sessions-explorer-mcp`) that

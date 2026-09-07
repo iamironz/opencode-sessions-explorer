@@ -42,7 +42,7 @@ history, then branch into the right workflow guide.
    there is no separate `npm install` step, and all 18 tools auto-register.
 
 1. Run the install health probe before exporting. Warnings for a missing export
-   tree, missing `ck`, or missing `ck` index are expected on a fresh install:
+   tree or missing `ck` are expected on a fresh install:
 
    ```bash
    bunx opencode-sessions-explorer-check-deps
@@ -54,16 +54,6 @@ history, then branch into the right workflow guide.
    bunx opencode-sessions-explorer-bulk-export
    ```
 
-1. (Optional) Prewarm the `ck` index. Semantic `search-text` searches
-   (`mode:'sem'` and `mode:'hybrid'`) let `ck` lazily build or refresh the index
-   during the search. Prewarming only avoids first-search latency or helps
-   troubleshooting. Run it in the export root, not in the repository checkout:
-
-   ```bash
-   cd ~/.local/share/opencode-sessions-explorer
-   ck --index .  # optional prewarm in the export root
-   ```
-
 1. Run the install health probe again and confirm there are no hard failures:
 
    ```bash
@@ -73,9 +63,9 @@ history, then branch into the right workflow guide.
 ## Validate
 
 1. Read the final `check-deps` output. It reports database reachability, schema and
-   drift, SQLite `json1`, `busy_timeout`, export tree, channel views, `ck` CLI,
-   `ck` index, and tool-output directory status. Exit code `0` means all green, `1`
-   means optional pieces are missing, and `2` means the plugin cannot work yet.
+   drift, SQLite `json1`, `busy_timeout`, export tree, channel views, `ck` CLI, and
+   tool-output directory status. Exit code `0` means all green, `1` means optional
+   pieces are missing, and `2` means the plugin cannot work yet.
 
 1. In OpenCode, ask an orientation question such as "what session am I in?" — the
    model routes to `current-session` and returns this session's id, agent, model,

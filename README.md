@@ -58,8 +58,8 @@ above is preferred for normal users.
 
 1. **Quit and restart OpenCode.** All 18 tools auto-register. OpenCode auto-installs
    npm plugins with Bun on startup, so there is no separate `npm install` step.
-1. Run the health probe once. Warnings for the missing export tree, missing `ck`, or
-   missing `ck` index are okay at this stage:
+1. Run the health probe once. Warnings for the missing export tree or missing `ck`
+   are okay at this stage:
 
 ```bash
 bunx opencode-sessions-explorer-check-deps
@@ -71,17 +71,7 @@ bunx opencode-sessions-explorer-check-deps
 bunx opencode-sessions-explorer-bulk-export
 ```
 
-1. (Optional) Prewarm the `ck` index from the export root, not the repo root.
-   Semantic `search-text` searches (`sem` and `hybrid`) ask `ck` to build or refresh
-   the index lazily, so this step is only for avoiding first-search latency or
-   troubleshooting:
-
-```bash
-cd ~/.local/share/opencode-sessions-explorer
-ck --index .  # run in the export root, not the repo root
-```
-
-1. Run the health probe again to confirm the export and optional index state:
+1. Run the health probe again to confirm the export is populated:
 
 ```bash
 bunx opencode-sessions-explorer-check-deps
@@ -128,10 +118,8 @@ full first-run walkthrough, see [docs/install.md](docs/install.md) and
 ### Export and Maintenance
 
 - **One-time export.** `bulk-export` materializes searchable session content for `ck`.
-- **Stay current.** The plugin auto-syncs new parts before each search call, then
-  lets semantic `search-text` searches lazily build or refresh the index. Explicit
-  `ck --index .` / `ck --reindex .` runs are optional prewarm or troubleshooting
-  steps for stale or partial coverage warnings.
+- **Stay current.** The plugin auto-syncs new parts into the export tree before each
+  search call, so `ck`'s regex scan sees current content without a manual re-export.
 - **Health probe.** `check-deps` and the `db-stats` tool report dependency and schema
   health.
 - See [docs/guides/export-and-maintenance.md](docs/guides/export-and-maintenance.md).

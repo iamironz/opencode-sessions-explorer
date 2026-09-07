@@ -61,13 +61,13 @@ The plugin is a 4-layer pipeline:
 ```
 SQLite DB (read-only source of truth)
   -> filesystem export tree (~/.local/share/opencode-sessions-explorer; by-session + by-channel)
-  -> ck semantic index (.ck/; optional)
+  -> ck regex scan (stateless; optional)
   -> enriched response (re-fetches session/part metadata from SQLite per hit)
 ```
 
 See the [Architecture Reference](../reference/architecture.md) for the full layer
 diagram and read-only / single-writer invariants, and the
-[Export And Maintenance Guide](../guides/export-and-maintenance.md) for export/index
+[Export And Maintenance Guide](../guides/export-and-maintenance.md) for export
 operations. `AGENTS.md` holds the authoritative per-tool contract.
 
 ## Environment Overrides
