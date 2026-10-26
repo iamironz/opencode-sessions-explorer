@@ -7,8 +7,10 @@ gotchas for `opencode-sessions-explorer`.
 
 ## Prerequisites
 
-- [Bun](https://bun.sh) >= 1.0. OpenCode ships Bun; install it standalone only if
-  you run the bundled CLIs directly. The runtime is Bun, not Node — the plugin
+- [Bun](https://bun.sh) >= 1.4 for working on the checkout (`bun.lock` uses lockfile
+  v2; the pinned version is `packageManager` in `package.json`, which CI also reads).
+  OpenCode ships Bun; install it standalone only if you work on the checkout or run
+  the bundled CLIs directly. The runtime is Bun, not Node — the plugin
   uses `bun:sqlite`, which should include SQLite `json1`; `check-deps` / `db-stats`
   verify it.
 - An OpenCode **V2** plugin host (`@opencode/plugin >= 2.1`, e.g. opencode v2.1.3).

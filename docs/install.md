@@ -76,7 +76,7 @@ grant the one permission it needs to read the OpenCode session database.
 ### From Source (Dev)
 
 To run a local checkout instead of the published package, install dependencies in
-the checkout first:
+the checkout first (needs a standalone Bun >= 1.4, because `bun.lock` uses lockfile v2):
 
 ```bash
 bun install --frozen-lockfile

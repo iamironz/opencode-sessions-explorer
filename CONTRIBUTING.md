@@ -6,9 +6,10 @@ runtime is Bun, not Node).
 
 ## Requirements
 
-- [Bun](https://bun.sh) `>= 1.0` (OpenCode ships Bun; install it standalone only if you run
-  the bundled CLIs directly; `bun:sqlite` should include SQLite `json1`, and
-  `check-deps` / `db-stats` verify it).
+- [Bun](https://bun.sh) `>= 1.4` for development (`bun.lock` uses lockfile v2; the pinned
+  version is `packageManager` in `package.json`, which CI also reads). OpenCode ships Bun;
+  install it standalone only if you work on the checkout or run the bundled CLIs directly;
+  `bun:sqlite` should include SQLite `json1`, and `check-deps` / `db-stats` verify it.
 - An OpenCode **V2** plugin host (`@opencode/plugin >= 2.1`, e.g. opencode v2.1.3) for
   runtime validation.
 - [`ck`](https://github.com/BeaconBay/ck) `>= 0.7` — only if you work on `search-text` /

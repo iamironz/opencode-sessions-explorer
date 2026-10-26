@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Security: `@modelcontextprotocol/sdk` raised to `^1.32.2` (was `^1.29.0`, locked 1.30.0) and its vulnerable transitive dependencies refreshed in `bun.lock` (`body-parser` 2.4.0, `fast-uri` 3.1.9, `hono` 4.13.14, `ip-address` 10.7.5, `proxy-addr` 2.0.8, `zod` 4.6.7); `bun audit` now reports no vulnerabilities (was 18: 1 critical, 5 high). Only the standalone MCP stdio server (`src/mcp.ts`) loads the SDK; the OpenCode plugin entry does not.
+
+- Changed: toolchain aligned with the Bun runtime embedded in OpenCode 2.1.4 (1.4.4): `packageManager` is `bun@1.4.4` (`bun.lock` is now lockfile v2, so Bun ≥ 1.4 is required for local installs), CI and publish read the Bun version from `package.json` instead of a separate pin (was 1.3.10), `@types/bun` is pinned to `^1.4.4` instead of `latest`, and TypeScript moves to 7.0 (`^7.0.2`, native compiler; typecheck needs no code changes). Workflows use `actions/checkout@v7`, `actions/setup-node@v7`, and Node 24 for npm publish (Node 20 is end-of-life).
+
 - Added: successful envelopes echo the effective arguments in `meta.args` (provided + schema defaults) and the defaulted keys in `meta.args_defaulted`, so parameters silently dropped by the host (OpenCode Code Mode strips unknown keys, e.g. a typo `archvied`) are visible as defaults instead of a silently unfiltered result.
 
 - Added: `scripts/publish-live.sh` (`bun run publish:live`) — deploys an immutable snapshot and repoints the live config (hot-reload), avoiding the V2 server's per-path module cache pinning half-written modules.
