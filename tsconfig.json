@@ -7,7 +7,7 @@
     "types": ["bun"],
 
     "outDir": "./dist",
-    "rootDir": "./src",
+    "rootDir": ".",
     "declaration": false,
     "declarationMap": false,
     "sourceMap": false,
@@ -26,6 +26,6 @@
     "verbatimModuleSyntax": false,
     "isolatedModules": true
   },
-  "include": ["src/**/*.ts"],
+  "include": ["index.ts", "src/**/*.ts"],
   "exclude": ["node_modules", "dist", "tests", "examples", "docs"]
 }

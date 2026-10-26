@@ -9,8 +9,8 @@ runtime is Bun, not Node).
 - [Bun](https://bun.sh) `>= 1.0` (OpenCode ships Bun; install it standalone only if you run
   the bundled CLIs directly; `bun:sqlite` should include SQLite `json1`, and
   `check-deps` / `db-stats` verify it).
-- An OpenCode plugin host compatible with `@opencode-ai/plugin >= 1.15.0` for runtime
-  validation.
+- An OpenCode **V2** plugin host (`@opencode/plugin >= 2.1`, e.g. opencode v2.1.3) for
+  runtime validation.
 - [`ck`](https://github.com/BeaconBay/ck) `>= 0.7` — only if you work on `search-text` /
   `grep-session`; the other 16 tools work without it.
 - A populated OpenCode SQLite DB — only for live testing (the suite is hermetic by default).

@@ -37,23 +37,30 @@ Quick checks:
 
 - Confirm you edited the active OpenCode config path, usually
   `~/.config/opencode/opencode.json`.
-- Confirm the `plugin` array contains either the package spec
-  (`"opencode-sessions-explorer"` or a pinned version) or an absolute local path.
+- Confirm you are running an OpenCode **V2** host (`@opencode/plugin >= 2.1`, e.g.
+  v2.1.3). This plugin no longer loads on V1 hosts, and the published 0.1.x npm
+  releases target the V1 API, so they do not load on V2.
+- Confirm the `plugin` array entry points at the checkout **directory** (the folder
+  containing `index.ts`), for example
+  `{ "path": "/absolute/path/to/opencode-sessions-explorer" }`, or at a
+  V2-compatible package spec.
+- Confirm `bun install` has been run in the checkout.
 - Confirm you fully quit and restarted OpenCode; do not assume plugin hot reload.
-- If using source TypeScript, confirm the path to `src/plugin.ts` exists.
-- If using built JavaScript, confirm `bun run build` produced `dist/plugin.js`.
-- Confirm `src/plugin.ts` exports only the plugin function; extra non-function
-  exports can make OpenCode reject the plugin entrypoint.
+- Confirm `index.ts` and `src/plugin.ts` still export only the default
+  `Plugin.define({ id, setup })` definition; the V2 loader expects that default
+  export.
 
 Fix:
 
 - Correct the config, then fully restart OpenCode.
 - For source checkouts, see the supported source TS and built JS options in
   [install.md#from-source-dev](../install.md#from-source-dev).
-- If a local source path still fails, run a local import check from the checkout:
+- If a local source path still fails, run the plugin-load smoke test from the
+  checkout. It imports `index.ts`, runs `setup` against a simulated V2 host, and
+  checks that all 18 tools register (hermetic; it does not read your database):
 
   ```bash
-  bun -e 'import("./src/plugin.ts").then((m) => { if (typeof m.default !== "function") throw new Error("default export is not a function") })'
+  bun tests/smoke-plugin-load.ts
   ```
 
 ## Search Returns CK_NOT_FOUND
@@ -193,11 +200,38 @@ Quick checks:
 Fix:
 
 - Drift warnings usually mean the installed OpenCode version moved the database
-  schema ahead of (or behind) what the plugin expects. Align the plugin version with
-  your OpenCode version.
+  schema ahead of (or behind) what the plugin expects. The plugin hard-requires the
+  V2 tables `session_v2` and `session_message` with their expected columns (see
+  [configuration.md](../reference/configuration.md#database-schema)); a
+  `missing table: session_v2` error means the database has not been migrated to V2
+  (open it once with an OpenCode V2 host). The frozen V1 `session` / `message` /
+  `part` tables are not checked. Align the plugin version with your OpenCode
+  version.
 - If the warning is soft, read tools still work; treat the warning as a prompt to
   update. If `hard_drift` is reported, update the plugin before relying on affected
   tools.
+
+## get-part Returns NOT_FOUND For A prt_ Id
+
+`get-part` returns `NOT_FOUND` for an id such as `prt_…`, or search hits still show
+`prt_…` part ids.
+
+Quick checks:
+
+- Confirm the id has the V2 shape `<messageId>#<index>` (for example `msg_…#2`).
+  V2 stores parts inline in `session_message.data.content[]`, so legacy `prt_` ids
+  from 0.1.x exports or older transcripts do not resolve.
+
+Fix:
+
+- Get a current part id from `get-message`, `session-timeline`, or a fresh search
+  hit.
+- If search hits still carry `prt_` ids, the export tree predates the V2 port.
+  Rebuild it once:
+
+  ```bash
+  bunx opencode-sessions-explorer-bulk-export --reset
+  ```
 
 ## get-part Returns PATH_TRAVERSAL
 

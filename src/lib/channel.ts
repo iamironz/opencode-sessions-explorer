@@ -13,13 +13,18 @@ export const CHANNELS = [
   "tool-error",
   "code-touch",
   "tool-output",
-  "patch-summary",
   "reasoning",
-  "file",
   "raw",
 ] as const
 
 export type SearchChannel = typeof CHANNELS[number]
+
+/**
+ * Channels written by pre-V2 releases for part types the V2 adapter never
+ * produces (patch / file parts). Never written anymore; tombstone reconcile
+ * prunes their directories from older export trees.
+ */
+export const OBSOLETE_CHANNELS = ["patch-summary", "file"] as const
 
 export const SURFACES = ["recall", "debug_trace", "tool_audit", "code", "forensics"] as const
 export type SearchSurface = typeof SURFACES[number]
@@ -34,7 +39,7 @@ export function channelsForSurface(surface: SearchSurface, q = ""): SearchChanne
     case "tool_audit":
       return ["tool-input-summary", "tool-error"]
     case "code":
-      return ["conversation", "session-summary", "code-touch", "patch-summary", "tool-input-summary"]
+      return ["conversation", "session-summary", "code-touch", "tool-input-summary"]
     case "forensics":
       return ["raw"]
     case "recall":
@@ -47,7 +52,7 @@ export function inferSurface(q: string, explicit: SearchSurface = "recall"): Sea
   if (explicit !== "recall") return explicit
   const s = q.toLowerCase()
   if (/\b(error|exception|stack trace|failed|failure|crash|timeout|logs?|stderr|stdout)\b/.test(s)) return "debug_trace"
-  if (/\b(tool calls?|bash|command|grep|read tool|edit tool|apply_patch|mcp|jira tool|github tool)\b/.test(s)) return "tool_audit"
+  if (/\b(tool calls?|bash|shell|subagent|command|grep|read tool|edit tool|apply_patch|mcp|jira tool|github tool)\b/.test(s)) return "tool_audit"
   if (/\b(file|path|class|function|symbol|diff|patch|edited|wrote|changed|src\/|\.kt\b|\.ts\b|\.tsx\b|\.js\b|\.py\b)\b/.test(s)) return "code"
   return "recall"
 }
@@ -58,9 +63,7 @@ export function channelWeight(channel: SearchChannel): number {
     case "conversation": return 6
     case "tool-error": return 5
     case "code-touch": return 4
-    case "patch-summary": return 3
     case "tool-input-summary": return 3
-    case "file": return 2
     case "tool-output": return 1
     case "reasoning": return 0
     case "raw": return 0
@@ -79,7 +82,7 @@ export function normalizePrompt(s: string): string {
     .replace(/(?:\/[\w .@-]+){2,}/g, "<path>")
     .replace(/\b[0-9a-f]{12,}\b/gi, "<id>")
     .replace(/\bses_[A-Za-z0-9_-]+\b/g, "<session>")
-    .replace(/\bmsg_[A-Za-z0-9_-]+\b/g, "<message>")
+    .replace(/\bmsg_[A-Za-z0-9_-]+(?:#\d+)?\b/g, "<message>")
     .replace(/\bprt_[A-Za-z0-9_-]+\b/g, "<part>")
     .replace(/\s+/g, " ")
     .trim()

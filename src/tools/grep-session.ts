@@ -1,4 +1,3 @@
-import { tool } from "@opencode-ai/plugin"
 import { stmt } from "../lib/db.js"
 import { runWithEnvelope, fail } from "../lib/envelope.js"
 import { runCk, type CkScopeCoverage } from "../lib/ck.js"
@@ -8,8 +7,22 @@ import { join } from "node:path"
 import { truncateString, redactSecrets } from "../lib/truncate.js"
 import { CHANNELS, channelsForSurface, inferSurface, type SearchChannel, type SearchSurface } from "../lib/channel.js"
 import { table } from "../lib/table.js"
+import { defineTool } from "../lib/tool-v2.js"
 
-export const grepSession = tool({
+export const grepSession = defineTool<{
+  session_id: string
+  pattern: string
+  surface: SearchSurface
+  channels?: readonly SearchChannel[]
+  fixed_string: boolean
+  case_sensitive: boolean
+  whole_word: boolean
+  context_lines: number
+  limit: number
+  redact: boolean
+} & Record<string, unknown>>({
+  name: "opencode-sessions-explorer-grep-session",
+  removedArgs: { mode: "mode is not supported by grep-session (semantic modes were removed); grep always uses regex — remove this parameter" },
   description:
     "opencode-sessions-explorer: grep/regex search inside ONE specific OpenCode session's body content (when you already have the session id). " +
     "Answers: \"inside session ses_X, grep for Y\", \"search session ses_Z for pattern P\", \"find references to X within session ses_Y\", \"regex search in a single session\", \"look up keyword W inside session ses_V\". " +
@@ -18,23 +31,27 @@ export const grepSession = tool({
     "Uses regex search. Supports fixed_string (literal match, no regex special chars), case_sensitive, whole_word, context_lines (lines before/after match). " +
     "For CROSS-SESSION content search (across ALL your OpenCode sessions) use search-text instead — that one supports group_by_session and role filter.",
   args: {
-    session_id: tool.schema.string().describe("Session ID"),
-    pattern: tool.schema.string().describe("Pattern (regex by default unless fixed_string=true)"),
-    surface: tool.schema.enum(["recall", "debug_trace", "tool_audit", "code", "forensics"]).default("recall"),
-    channels: tool.schema.array(tool.schema.enum(CHANNELS)).optional().describe("Override surface-derived channels. Use raw for current full-fidelity behavior."),
-    fixed_string: tool.schema.boolean().default(false).describe("Treat pattern as fixed string (no regex)"),
-    case_sensitive: tool.schema.boolean().default(false),
-    whole_word: tool.schema.boolean().default(false),
-    context_lines: tool.schema.number().int().min(0).max(10).default(1),
-    limit: tool.schema.number().int().min(1).max(200).default(50),
-    redact: tool.schema.boolean().default(true).describe("Mask obvious secrets in snippets"),
+    type: "object",
+    properties: {
+      session_id: { type: "string", description: "Session ID" },
+      pattern: { type: "string", description: "Pattern (regex by default unless fixed_string=true)" },
+      surface: { type: "string", enum: ["recall", "debug_trace", "tool_audit", "code", "forensics"], default: "recall" },
+      channels: { type: "array", items: { type: "string", enum: [...CHANNELS] }, description: "Override surface-derived channels. Use raw for current full-fidelity behavior." },
+      fixed_string: { type: "boolean", default: false, description: "Treat pattern as fixed string (no regex)" },
+      case_sensitive: { type: "boolean", default: false },
+      whole_word: { type: "boolean", default: false },
+      context_lines: { type: "integer", minimum: 0, maximum: 10, default: 1 },
+      limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+      redact: { type: "boolean", default: true, description: "Mask obvious secrets in snippets" },
+    },
+    required: ["session_id", "pattern"],
   },
   async execute(args) {
     return runWithEnvelope("grep_session", 160, async (ctx) => {
       if ("mode" in (args as object)) {
         fail("BAD_ARGS", "mode is not supported by grep-session", "Remove mode; grep-session always uses regex.")
       }
-      const session = stmt(`SELECT id, title, directory, time_archived FROM session WHERE id = ?`).get(args.session_id) as any
+      const session = stmt(`SELECT id, title, directory, time_archived FROM session_v2 WHERE id = ?`).get(args.session_id) as any
       if (!session) fail("NOT_FOUND", `session not found: ${args.session_id}`)
 
       try {
@@ -96,7 +113,7 @@ function warnOnPartialScopeCoverage(ctx: any, coverage: CkScopeCoverage): void {
 }
 
 function enrichHit(h: any, redact: boolean) {
-  // ck path format: ".../by-session/<ses_id>/<NNNN>-<prt_id>.txt"
+  // ck path format: ".../by-session/<ses_id>/<NNNN>-<part_id>.txt"
   const parsed = parseHitPath(h.path)
   let snippet = h.snippet ?? ""
   if (redact) snippet = redactSecrets(snippet)
@@ -114,9 +131,9 @@ function enrichHit(h: any, redact: boolean) {
 }
 
 function parseHitPath(p: string): { partId: string | null; channel: SearchChannel } {
-  const ch = /\/by-channel\/([^/]+)\/by-session\/ses_[A-Za-z0-9_-]+\/(?:summary\.txt|(?:\d{5}-)?(prt_[A-Za-z0-9_-]+)\.txt)$/.exec(p)
+  const ch = /\/by-channel\/([^/]+)\/by-session\/ses_[A-Za-z0-9_-]+\/(?:summary\.txt|(?:\d{5}-)?(msg_[A-Za-z0-9_-]+#\d+)\.txt)$/.exec(p)
   if (ch) return { partId: ch[2] ?? null, channel: (ch[1] as SearchChannel) ?? "raw" }
-  const m = /\/\d{5}-(prt_[A-Za-z0-9_-]+)\.txt$/.exec(p)
+  const m = /\/\d{5}-(msg_[A-Za-z0-9_-]+#\d+)\.txt$/.exec(p)
   return { partId: m?.[1] ?? null, channel: "raw" }
 }
 

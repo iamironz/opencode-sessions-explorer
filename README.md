@@ -27,20 +27,28 @@ Unarchive session ses_… so I can open it again.
 
 | Area | Support | Notes |
 | --- | --- | --- |
-| OpenCode | Plugin host compatible with `@opencode-ai/plugin >= 1.15.0` | Loads the plugin and owns the source database |
+| OpenCode | **V2 plugin API** (`@opencode/plugin >= 2.1`, e.g. opencode v2.1.3) — directory entry (`index.ts`) via `Plugin.define` | Loads the plugin and owns the source database. The V1 plugin API (`@opencode-ai/plugin`, pre-V2 hosts) is no longer supported. |
+| Data schema | OpenCode **V2 SQLite schema**: `session_v2` + `session_message` (parts inline in `data.content[]`) | Includes all imported pre-V2 history. The frozen V1 `session`/`message`/`part` tables are not read. |
 | Bun | `>= 1.0` | Runtime; the plugin uses `bun:sqlite` (OpenCode ships Bun), which should include SQLite `json1`; `check-deps` / `db-stats` verify it |
 | `ck` | `>= 0.7`, optional | Only `search-text` / `grep-session` need it; the other 16 tools work without it |
 | OS | macOS / Linux | Windows paths resolve via `%LOCALAPPDATA%` |
 
+> **Upgrading from 0.1.x (V1 plugin)?** The data layer moved to the V2 tables
+> and part references changed shape: parts are addressed as
+> `<messageId>#<contentIndex>` instead of `prt_…` ids. Re-run
+> `opencode-sessions-explorer-bulk-export --reset` once — the export engine
+> re-exports from `session_message` and tombstones the old `prt_`-keyed files.
+
 ## Quick Start
 
-1. Add the plugin and grant access to the OpenCode data directory:
+1. Add the plugin (path points at the project DIRECTORY containing `index.ts`)
+   and grant access to the OpenCode data directory:
 
 ```jsonc
 // ~/.config/opencode/opencode.json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-sessions-explorer"],
+  "plugin": [{ "path": "/absolute/path/to/opencode-sessions-explorer" }],
   "permission": {
     "external_directory": {
       "~/.local/share/opencode/**": "allow"
@@ -56,8 +64,8 @@ directory and restart OpenCode. Some existing global configs use
 `external_directory: "allow"`; that also permits access, but the scoped path rule
 above is preferred for normal users.
 
-1. **Quit and restart OpenCode.** All 18 tools auto-register. OpenCode auto-installs
-   npm plugins with Bun on startup, so there is no separate `npm install` step.
+1. **Quit and restart OpenCode.** All 18 tools auto-register through the V2
+   `tool.transform` hook when the plugin's `setup` runs.
 1. Run the health probe once. Warnings for the missing export tree or missing `ck`
    are okay at this stage:
 
@@ -65,7 +73,8 @@ above is preferred for normal users.
 bunx opencode-sessions-explorer-check-deps
 ```
 
-1. Materialize the search export once:
+1. Materialize the search export once (add `--reset` when upgrading from a
+   0.1.x/V1-era export tree):
 
 ```bash
 bunx opencode-sessions-explorer-bulk-export
@@ -91,7 +100,10 @@ full first-run walkthrough, see [docs/install.md](docs/install.md) and
 - **Walk a session.** `session-timeline` and `session-genealogy` trace the
   chronology and the parent/subagent chain.
 - **Drill into detail.** `get-message` and `get-part` fetch individual messages and
-  parts, with optional tool-output dereference.
+  parts, with optional tool-output dereference. Under the V2 schema parts are
+  inline in each message (`data.content[]`) and are addressed by synthesized ids
+  `<messageId>#<index>` — the ids you see in `session-timeline` events and
+  `search-text` hits.
 - **Browse and filter.** `list-sessions` and `search-sessions-meta` find sessions by
   recency, agent, directory, title, or cost.
 - See [docs/guides/recall-and-navigation.md](docs/guides/recall-and-navigation.md).
@@ -103,7 +115,11 @@ full first-run walkthrough, see [docs/install.md](docs/install.md) and
 - **Grep one session.** `grep-session` scans a single session's curated channels,
   with raw replay via `surface:'forensics'`.
 - **Audit tool calls.** `search-tool-calls` finds every invocation of a command,
-  every read that errored, or all calls to a given MCP.
+  every read that errored, or all calls to a given MCP. Exact tool names match
+  across the OpenCode V2 rename (`bash`/`shell`, `task`/`subagent`), and per-tool
+  aggregates merge both eras under the V2 name; after the V2 migration MCP calls
+  are recorded as Code Mode `execute` calls (see
+  [Tool-Name Aliases](docs/reference/tools.md#tool-name-aliases)).
 - See [docs/guides/search-and-grep.md](docs/guides/search-and-grep.md).
 
 ### Cost and Usage Analysis
@@ -127,8 +143,9 @@ full first-run walkthrough, see [docs/install.md](docs/install.md) and
 ### Archived Session Recovery
 
 - **Restore a buried session.** `unarchive-session` is the one write tool — it clears
-  `time_archived` **and** refreshes `time_updated` so the session resurfaces at the
-  top of the per-directory list and can be opened again.
+  `session_v2.time_archived` **and** refreshes `time_updated` (the column the V2
+  session picker orders by) so the session resurfaces at the top of the list and
+  can be opened again.
 - See [docs/guides/manage-archived-sessions.md](docs/guides/manage-archived-sessions.md).
 
 ### Privacy and Safety
@@ -139,6 +156,31 @@ full first-run walkthrough, see [docs/install.md](docs/install.md) and
   snippets by default; `get-part` dereference is path-guarded to a whitelist root.
 - See [docs/reference/configuration.md](docs/reference/configuration.md) and
   [.github/SECURITY.md](.github/SECURITY.md).
+
+### Argument Validation
+
+Every tool validates its arguments against its JSON Schema before running.
+Unknown parameters, wrong types, out-of-range numbers and values outside an
+enum are rejected with a `BAD_ARGS` envelope instead of silently matching
+nothing. The error `message` lists every problem at once (with a "did you
+mean …?" suggestion for typos) and the `hint` carries the full valid signature,
+for example:
+
+```text
+message: Invalid arguments for opencode-sessions-explorer-get-message:
+         part_types[0]: got "patch"; allowed: "text" | "tool" | "reasoning" | "compaction"
+hint:    Valid parameters (* = required): message_id*: string; include_part_data: boolean (default true); ...
+```
+
+`null` on an optional parameter counts as omitted. When the tools are called
+through OpenCode V2 Code Mode, the host also pre-validates with the same
+schema; note that Code Mode drops unknown keys before they reach the plugin.
+
+Every successful response echoes the effective arguments in `meta.args`
+(provided values + schema defaults) and lists the defaulted keys in
+`meta.args_defaulted`. A dropped typo therefore stays visible: calling
+`cost-by-project` with `archvied: "only"` returns `archived: "any"` with
+`archived` in `args_defaulted`, i.e. the filter was not applied.
 
 ## Documentation
 

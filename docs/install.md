@@ -9,32 +9,47 @@ grant the one permission it needs to read the OpenCode session database.
 
 | Area | Requirement |
 | --- | --- |
-| OpenCode | A working OpenCode install with plugin host compatibility for `@opencode-ai/plugin >= 1.15.0` |
+| OpenCode | A working OpenCode **V2** install (plugin API `@opencode/plugin >= 2.1`, e.g. opencode v2.1.3). The V1 plugin API (`@opencode-ai/plugin`, pre-V2 hosts) is no longer supported. |
+| Data schema | The OpenCode V2 SQLite schema (`session_v2` + `session_message`). Imported pre-V2 history is included; the frozen V1 `session`/`message`/`part` tables are not read. |
 | Bun | `>= 1.0`; bundled with OpenCode, needed standalone only to run the CLIs directly. The plugin uses `bun:sqlite`, which should include SQLite `json1`; `check-deps` / `db-stats` verify it. |
 | `ck` (optional) | `>= 0.7`, only for `search-text` and `grep-session` |
 
+> **Upgrading from 0.1.x (V1 plugin)?** Part references changed shape: parts are
+> now addressed as `<messageId>#<contentIndex>` (for example `msg_…#0`) instead
+> of `prt_…` ids. Run `opencode-sessions-explorer-bulk-export --reset` once after
+> upgrading; the export engine re-exports from `session_message` and tombstones the
+> old `prt_`-keyed files.
+
 ## Steps
 
-1. Add the plugin to the `plugin` array in `~/.config/opencode/opencode.json`:
+1. Add the plugin to the `plugin` array in `~/.config/opencode/opencode.json`. The
+   V2 host loads a plugin from a **directory entry**: point `path` at the project
+   directory that contains `index.ts`:
 
    ```jsonc
    {
      "$schema": "https://opencode.ai/config.json",
-     "plugin": ["opencode-sessions-explorer"]
+     "plugin": [{ "path": "/absolute/path/to/opencode-sessions-explorer" }]
    }
    ```
 
-   OpenCode auto-installs npm plugins with Bun on startup and caches them under
-   `~/.cache/opencode/node_modules`, so there is no separate install command.
+   `index.ts` re-exports the `Plugin.define({ id, setup })` definition from
+   `src/plugin.ts`; there is no separate install command beyond `bun install` in
+   the checkout (see [From Source](#from-source-dev)).
 
-1. (Optional) Pin a version to avoid surprise upgrades by appending the version to
-   the package spec (for example, the current latest):
+1. (Optional) Use the npm package spec instead of a local path. OpenCode
+   auto-installs npm plugins with Bun on startup and caches them under
+   `~/.cache/opencode/node_modules`. Pin a version to avoid surprise upgrades:
 
    ```jsonc
    {
-     "plugin": ["opencode-sessions-explorer@0.1.1"]
+     "plugin": ["opencode-sessions-explorer@<version>"]
    }
    ```
+
+   Only releases that include the V2 port load on a V2 host; the published 0.1.x
+   releases target the V1 plugin API. Check [CHANGELOG.md](../CHANGELOG.md) before
+   pinning.
 
 1. Grant access to the OpenCode data directory. This is required because the
    database lives outside your project workspace:
@@ -55,7 +70,8 @@ grant the one permission it needs to read the OpenCode session database.
    configs may use `external_directory: "allow"`; that works, but the scoped path
    rule above is preferred for normal users.
 
-1. Quit and restart OpenCode. All 18 tools auto-register on the next launch.
+1. Quit and restart OpenCode. All 18 tools auto-register through the V2
+   `ctx.tool.transform` hook when the plugin's `setup` runs.
 
 ### From Source (Dev)
 
@@ -66,38 +82,30 @@ the checkout first:
 bun install --frozen-lockfile
 ```
 
-Then choose one source-dev mode.
-
-#### Option A: Source TypeScript For Iteration
-
-Point the `plugin` array at the source entrypoint using an absolute path:
+Then register the checkout directory (the folder containing `index.ts`) with an
+absolute path:
 
 ```jsonc
 {
-  "plugin": ["/absolute/path/to/opencode-sessions-explorer/src/plugin.ts"]
+  "plugin": [{ "path": "/absolute/path/to/opencode-sessions-explorer" }]
 }
 ```
 
-This is the fastest iteration path because there is no `dist/` rebuild step, but a
-full OpenCode restart is still required after config or code changes. Do not assume
-hot reload.
+The host runs the TypeScript sources directly, so there is no `dist/` rebuild step,
+but a full OpenCode restart is still required after config or code changes. Do not
+assume hot reload.
 
-#### Option B: Built JavaScript
+`bun run build` produces `dist/` — the npm package entry (`dist/plugin.js`), the
+bundled CLIs under `dist/bin/`, and the MCP server `dist/mcp.js`. You need it for
+publishing, for the MCP entry point below, and for validating the built CLIs; it is
+not needed to load the plugin from a checkout.
 
-Build the bundle, then point OpenCode at the built entrypoint:
+Confirm the plugin wiring without starting OpenCode (hermetic: simulates the V2
+host, runs `setup`, and checks that all 18 tools register):
 
 ```bash
-bun run build
+bun tests/smoke-plugin-load.ts
 ```
-
-```jsonc
-{
-  "plugin": ["/absolute/path/to/opencode-sessions-explorer/dist/plugin.js"]
-}
-```
-
-When using `dist/`, rebuild and fully restart OpenCode after code changes. There is
-no hot reload guarantee for local plugin paths.
 
 For contributor commands, quality gates, and source-dev maintenance pointers, see
 the [Development Guide](maintainers/development.md).
@@ -178,8 +186,7 @@ bun src/bin/check-deps.ts
 bun src/bin/bulk-export.ts
 ```
 
-If you selected the built-JS option and have already run `bun run build`, you can
-also validate the built CLI:
+If you have already run `bun run build`, you can also validate the built CLI:
 
 ```bash
 bun dist/bin/check-deps.js

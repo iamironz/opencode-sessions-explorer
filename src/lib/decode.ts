@@ -34,33 +34,33 @@ export type DecodedToolPart = {
   duration_ms: number | null
   title: string | null
 }
-export type DecodedFilePart = { type: "file"; url: string | null; filename: string | null; mime: string | null; sourcePath: string | null }
-export type DecodedPatchPart = { type: "patch"; hash: string | null; files: string[] }
-export type DecodedStepStart = { type: "step-start"; snapshot: string | null }
-export type DecodedStepFinish = { type: "step-finish"; reason: string | null; snapshot: string | null; cost: number | null }
 export type DecodedCompaction = { type: "compaction"; auto: boolean }
-export type DecodedSubtask = { type: "subtask"; prompt: string; description: string | null; agent: string | null }
 export type DecodedUnknown = { type: "unknown"; raw_type: string | null }
 
+/**
+ * The V2 adapter (`lib/v2-parts.ts`) only projects text/reasoning/tool/
+ * compaction parts; anything else decodes as `unknown`.
+ */
 export type DecodedPart =
   | DecodedTextPart
   | DecodedReasoningPart
   | DecodedToolPart
-  | DecodedFilePart
-  | DecodedPatchPart
-  | DecodedStepStart
-  | DecodedStepFinish
   | DecodedCompaction
-  | DecodedSubtask
   | DecodedUnknown
 
 function safeParse(jsonStr: string): any {
   try { return JSON.parse(jsonStr) } catch { return null }
 }
 
-export function decodeMessage(dataStr: string): DecodedMessage {
+/**
+ * V2: the role lives in the `session_message.type` column (there is no
+ * `$.role` in `data`); pass it in. `d.role` is still honored defensively.
+ * V2 assistant `model` is `{id, providerID, variant}` — `id`, not `modelID`.
+ */
+export function decodeMessage(dataStr: string, typeRole?: string): DecodedMessage {
   const d = safeParse(dataStr) ?? {}
-  const role = (d.role === "user" || d.role === "assistant" || d.role === "system") ? d.role : "unknown"
+  const raw = typeRole ?? d.role
+  const role = (raw === "user" || raw === "assistant" || raw === "system") ? raw : "unknown"
   const tokens = d.tokens
     ? {
         input: Number(d.tokens.input ?? 0),
@@ -74,7 +74,7 @@ export function decodeMessage(dataStr: string): DecodedMessage {
     role,
     agent: d.agent ?? null,
     providerID: d.model?.providerID ?? d.providerID ?? null,
-    modelID: d.model?.modelID ?? d.modelID ?? null,
+    modelID: d.model?.modelID ?? d.model?.id ?? d.modelID ?? null,
     parentID: d.parentID ?? null,
     cost: typeof d.cost === "number" ? d.cost : null,
     tokens,
@@ -112,38 +112,8 @@ export function decodePart(dataStr: string): DecodedPart {
         title: typeof s.title === "string" ? s.title : null,
       }
     }
-    case "file":
-      return {
-        type: "file",
-        url: typeof d.url === "string" ? d.url : null,
-        filename: typeof d.filename === "string" ? d.filename : null,
-        mime: typeof d.mime === "string" ? d.mime : null,
-        sourcePath: typeof d.source?.path === "string" ? d.source.path : null,
-      }
-    case "patch":
-      return {
-        type: "patch",
-        hash: typeof d.hash === "string" ? d.hash : null,
-        files: Array.isArray(d.files) ? d.files.filter((x: any) => typeof x === "string") : [],
-      }
-    case "step-start":
-      return { type: "step-start", snapshot: typeof d.snapshot === "string" ? d.snapshot : null }
-    case "step-finish":
-      return {
-        type: "step-finish",
-        reason: typeof d.reason === "string" ? d.reason : null,
-        snapshot: typeof d.snapshot === "string" ? d.snapshot : null,
-        cost: typeof d.cost === "number" ? d.cost : null,
-      }
     case "compaction":
       return { type: "compaction", auto: d.auto === true }
-    case "subtask":
-      return {
-        type: "subtask",
-        prompt: typeof d.prompt === "string" ? d.prompt : "",
-        description: typeof d.description === "string" ? d.description : null,
-        agent: typeof d.agent === "string" ? d.agent : null,
-      }
     default:
       return { type: "unknown", raw_type: typeof t === "string" ? t : null }
   }
@@ -163,5 +133,5 @@ export function decodeModel(modelStr: string | null | undefined): DecodedModel {
 
 /** Type-predicate helpers used by callers. */
 export function isPartType(t: string): t is PartType {
-  return ["text", "tool", "reasoning", "file", "patch", "step-start", "step-finish", "compaction", "subtask"].includes(t)
+  return ["text", "tool", "reasoning", "compaction"].includes(t)
 }

@@ -1,10 +1,12 @@
 # AGENTS.md
 
-`opencode-sessions-explorer` is an **OpenCode plugin** that exposes the local OpenCode
-SQLite DB (`~/.local/share/opencode/opencode.db`) to the LLM as 18 tools — 17 read-only
-(recall, search, cost/usage analysis) plus one deliberate write (`unarchive-session`).
-Runtime is **Bun** (it uses `bun:sqlite`), not Node. `README.md` has the full tool
-catalog; `CHANGELOG.md` tracks status.
+`opencode-sessions-explorer` is an **OpenCode V2 plugin** that exposes the local
+OpenCode SQLite DB (`~/.local/share/opencode/opencode.db`, V2 schema:
+`session_v2` + `session_message`, parts INLINE in `data.content[]`) to the LLM
+as 18 tools — 17 read-only (recall, search, cost/usage analysis) plus one
+deliberate write (`unarchive-session`). Runtime is **Bun** (it uses
+`bun:sqlite`), not Node. `README.md` has the full tool catalog; `CHANGELOG.md`
+tracks status.
 
 ## Commands
 
@@ -38,31 +40,60 @@ hermetic test suite, the end-to-end verify, and `pack:dry` on ubuntu + macos;
   compiled path, e.g. `import { stmt } from "../lib/db.js"` — even though the file is
   `db.ts`. Required by `tsc` (`moduleResolution: bundler`) and `bun build`. (Files under
   `tests/` import `src` with `.ts`; that is fine because bun runs them unbuilt.)
-- **Tests need a populated *live* DB and are NOT portable.** `tests/fixtures.json`
-  hardcodes real `ses_/msg_/prt_` IDs and `expected_counts` minimums (e.g.
-  `part_min: 240000`) from the author's machine. `bun test` runs against your real
-  `~/.local/share/opencode/opencode.db` and fails if it lacks those IDs/counts. No
-  hermetic fixture exists yet (roadmap). Do not treat fixture-ID failures as regressions.
-- **`src/plugin.ts` must export only the Plugin function.** OpenCode's loader rejects
-  with `Plugin export is not a function` if any non-function export sits beside it; the
-  `default` and named exports are the same function by design. Do not add stray exports.
+- **Tests are hermetic by default; LIVE mode is opt-in.** `bun test` preloads
+  `tests/setup.ts`, which points every `OPENCODE_SESSIONS_EXPLORER_*` path at a
+  temp dir and builds a synthetic V2 fixture DB (`tests/fixtures/build-fixture.ts`).
+  With `OPENCODE_SESSIONS_EXPLORER_LIVE=1` (`bun run test:live`) the preload no-ops
+  and tests run against your real `~/.local/share/opencode/opencode.db` using
+  `tests/fixtures.json` — those LIVE IDs/counts are from the author's machine, so
+  LIVE fixture-ID failures are NOT regressions. LIVE grep/search tests also need a
+  populated export tree (`bulk-export --reset`) first.
+- **The V2 entry is the default export of `Plugin.define` at the project root.**
+  `index.ts` (directory entry for the V2 host) re-exports `src/plugin.ts`, whose ONLY
+  export is the `Plugin.define({ id, setup })` result. Tools register through the
+  SYNCHRONOUS `ctx.tool.transform(editor => editor.add(tool))` hook — keep it cheap;
+  one-time side effects (e.g. capturing the location directory) belong in `setup`.
+  Tool args are plain JSON Schema; `lib/tool-v2.ts` (`defineTool`) applies defaults and
+  wraps the envelope string into the V2 `{ content }` result shape.
 - **The shared `lib/db.js` handle is read-only — never write through it.** It opens
   `readonly: true` + `PRAGMA query_only = 1`, so any write on that path throws. The live
   OpenCode process may be writing concurrently (WAL). The ONE sanctioned write surface is
   `lib/db-write.js` (used only by the `unarchive-session` tool), which opens a SEPARATE,
   short-lived `readwrite: true` connection for a single
-  `UPDATE session SET time_archived = NULL, time_updated = <now>` and closes it immediately.
-  The `time_updated` bump is REQUIRED, not cosmetic: OpenCode loads sessions ordered by
-  `time_updated DESC` with a default `LIMIT 100` per directory, so clearing only
-  `time_archived` leaves a long-archived session buried below that window and the app fails
-  to retrieve it ("Unable to retrieve session"). Do not add other writers, and do not route
-  writes through the shared read handle. (OpenCode exposes no HTTP/SDK endpoint that can
-  CLEAR the archived flag — `UpdatePayload.time.archived` is a finite number and the handler
-  ignores `undefined` — so the direct DB write is the only mechanism. See
-  `src/tools/unarchive-session.ts`.)
+  `UPDATE session_v2 SET time_archived = NULL, time_updated = <now>` and closes it
+  immediately. The `time_updated` bump is REQUIRED, not cosmetic: verified against the
+  opencode v2.1.3 binary, the V2 session picker (`SessionStore.list`) loads
+  `session_v2` ordered by `time_updated DESC, id DESC` (archived rows filtered via
+  `time_archived IS NULL`), so clearing only `time_archived` leaves a long-archived
+  session buried below the recency window and the app fails to retrieve it. Do not add
+  other writers, and do not route writes through the shared read handle. (OpenCode
+  exposes no HTTP/SDK endpoint that can CLEAR the archived flag, so the direct DB write
+  is the only mechanism. See `src/tools/unarchive-session.ts`.)
+- **V2 part identity is synthesized.** There are no `part` rows anymore; parts are
+  `session_message.data.content[]` items addressed as `<messageId>#<index>`
+  (`lib/v2-parts.ts` enumerates them, including user/system/synthetic text as `#0`
+  text parts and compaction markers as `#0` compaction parts). Export filenames,
+  timeline events, and search hits all use this id; `#` is preserved in filenames.
 - **`.d.ts` declaration emit is disabled** (`tsconfig` `declaration: false`) because
-  `tool({…})` leaks zod internals. Do not enable it without adding explicit
-  `: ToolDefinition` annotations per tool.
+  JSON-Schema tool inputs + the V2 `Info` generics leak host internals. Do not enable
+  it without adding explicit annotations per tool.
+
+- **Arguments are validated centrally in `defineTool`** (`lib/jsonschema.js`
+  `validateArgs`): unknown keys, wrong types, ranges and enums produce one `BAD_ARGS`
+  envelope listing every problem plus `describeArgs()` as the hint. Keep tool schemas
+  accurate — `tests/arg-validation.test.ts` asserts every tool's defaults and minimal
+  required input validate cleanly. Retired parameters get a specific message via the
+  `removedArgs` field of `defineTool` (e.g. `mode` on search-text/grep-session).
+- **Never point the live OpenCode config at this repo; publish snapshots.** The
+  long-running V2 server caches plugin modules by file path for the life of the
+  process, so hot-reloading straight from the mutable repo can pin a half-written
+  module (2026-10-26: every reload failed with "Export named … not found" until a fresh
+  path was used). Edit here, run the validation workflow, then `bun run publish:live`
+  (`scripts/publish-live.sh`): it copies `index.ts`/`package.json`/`src` to a new
+  `~/.cache/opencode-sessions-explorer-live/<UTC-stamp>/`, symlinks `node_modules`,
+  repoints the `plugin` entry in `~/.config/opencode/opencode.json` (hot-reload, no
+  server restart) and keeps the newest 3 snapshots. Never restart the operator's
+  OpenCode server to deploy.
 
 ## Architecture (4 layers)
 
@@ -84,13 +115,18 @@ before each search call.
   Register it in `src/tools/index.ts` under the `opencode-sessions-explorer-<name>` key
   **and** the re-export block.
 - Wrap the body in `runWithEnvelope("<fn_name>", capKb, async (ctx) => { … })`
-  (`lib/envelope.js`). This builds the `{ ok, data, meta, warnings }` envelope, runs
-  schema-drift detection, and sizes the payload against `capKb`.
+  (`lib/envelope.js`) inside a `defineTool({ name, description, args, execute })`
+  (`lib/tool-v2.js`). `defineTool` applies JSON-Schema defaults and wraps the
+  envelope into the V2 `{ content }` result; `runWithEnvelope` builds the
+  `{ ok, data, meta, warnings }` envelope, runs schema-drift detection, and sizes
+  the payload against `capKb`.
 - Raise recoverable errors via `fail(code, msg, hint)` or
   `throw new SessionsError(code, msg, hint)` using a code from `lib/errors.ts`
   (`NOT_FOUND`, `BAD_ARGS`, `CK_NOT_FOUND`, …). Do not invent ad-hoc error shapes.
 - Query the DB through `stmt(sql).all/get(...)` (`lib/db.js`) — cached prepared
-  statements; use `json_extract(...)` for the JSON `data` columns on `message`/`part`.
+  statements; use `json_each(sm.data,'$.content')` + `json_extract(...)` for the
+  inline V2 parts, and NEVER alias a `json_extract` expression as `key` in
+  `GROUP BY key` (SQLite 3.53 mis-groups it — use `grp` and map back in TS).
 - **List-shaped results must be wrapped in `table(records, { dict: [...] })`**
   (`lib/table.ts`) — lossless columnar + interning format. Reference decoder is
   `decodeTable()`.

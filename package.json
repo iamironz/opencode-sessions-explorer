@@ -52,7 +52,8 @@
     "test:live": "OPENCODE_SESSIONS_EXPLORER_LIVE=1 bun test tests/",
     "clean": "rm -rf dist/",
     "prepack": "bun run build",
-    "pack:dry": "npm pack --dry-run"
+    "pack:dry": "npm pack --dry-run",
+    "publish:live": "bash scripts/publish-live.sh"
   },
   "engines": {
     "bun": ">=1.0.0"
@@ -62,15 +63,11 @@
     "access": "public",
     "provenance": true
   },
-  "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.15.0"
-  },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "zod": "^4.0.0"
+    "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "1.18.16",
+    "@opencode/plugin": "2.1.4",
     "@types/bun": "latest",
     "typescript": "^6.0.3"
   }

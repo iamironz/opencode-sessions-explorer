@@ -21,7 +21,7 @@ to your OpenCode config and restart:
 // ~/.config/opencode/opencode.json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-sessions-explorer"],
+  "plugin": [{ "path": "/absolute/path/to/opencode-sessions-explorer" }],
   "permission": {
     "external_directory": {
       "~/.local/share/opencode/**": "allow"
@@ -44,11 +44,37 @@ rule is preferred for normal installs.
 
 ## Runtime Compatibility
 
-The plugin targets the OpenCode plugin host contract provided by
-`@opencode-ai/plugin >= 1.15.0`. It runs on Bun and uses `bun:sqlite`, which should
-include SQLite `json1`; the bundled health probes (`check-deps` CLI and `db-stats`
-tool) verify `json1`, schema drift, and database runtime settings for the active
-OpenCode database.
+The plugin targets the OpenCode **V2** plugin API (`@opencode/plugin >= 2.1`, e.g.
+opencode v2.1.3). The host loads the project directory's `index.ts`, whose default
+export is a `Plugin.define({ id, setup })` definition; `setup` registers every tool
+through `ctx.tool.transform(editor => editor.add(tool))`. Tool arguments are plain
+JSON Schema (`input`) and results use the V2 `{ content }` shape. The V1 plugin API
+(`@opencode-ai/plugin`, zod-based `tool()`) is no longer supported.
+
+It runs on Bun and uses `bun:sqlite`, which should include SQLite `json1`; the
+bundled health probes (`check-deps` CLI and `db-stats` tool) verify `json1`, schema
+drift, and database runtime settings for the active OpenCode database.
+
+### Database Schema
+
+All reads use the OpenCode V2 tables:
+
+| Table | What The Plugin Reads |
+| --- | --- |
+| `session_v2` | One row per session: `id`, `project_id`, `workspace_id`, `parent_id`, `slug`, `directory`, `path`, `title`, `version`, `share_url`, `cost`, `tokens_input` / `tokens_output` / `tokens_reasoning` / `tokens_cache_read` / `tokens_cache_write`, `agent`, `model`, and `time_created` / `time_updated` / `time_compacting` / `time_archived` / `time_suspended`. |
+| `session_message` | One row per message: `id`, `session_id`, `type` (`user`, `assistant`, `idle`, plus `system`, `synthetic`, `compaction`, `model-switched`), `seq` (per-session order), `time_created` / `time_updated`, and a `data` JSON document. User rows carry `data.text`; assistant rows carry `agent`, `model`, `cost`, `tokens`, `finish`, and the message's parts **inline** in `data.content[]` (`text`, `reasoning` — which may carry provider-native metadata such as `native.signature` — and `tool` items). |
+| `migration` | Source of the reported `migrations_head` (falls back to the legacy `__drizzle_migrations` journal when absent). |
+
+V2 has no part rows, so the plugin synthesizes part ids as `<messageId>#<index>`
+(for example `msg_…#2`): the `content[]` index for assistant messages, and `#0` for
+the single text part of a user/system/synthetic message or the marker of a
+compaction message. `idle` and `model-switched` messages have no parts. Every tool
+that accepts or returns a part id (`get-part`, `get-message`, `session-timeline`,
+search hits, export filenames) uses this form.
+
+The legacy V1 `session` / `message` / `part` tables are frozen at the V2 migration
+(2026-10-23 on the reference install) and are neither read nor checked for drift;
+imported pre-V2 history is available through the V2 tables.
 
 ## Environment Overrides
 
@@ -58,7 +84,7 @@ the simplest way to point the plugin (or its tests) at non-default locations.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `OPENCODE_SESSIONS_EXPLORER_DB` | `$XDG_DATA_HOME/opencode/opencode.db` (macOS/Linux) or `%LOCALAPPDATA%\opencode\opencode.db` (Windows); falls back to `~/.local/share/opencode/opencode.db` | Absolute path to the OpenCode SQLite database the plugin reads. Set this when the database is not in the default OpenCode data directory. |
-| `OPENCODE_SESSIONS_EXPLORER_EXPORT_ROOT` | `~/.local/share/opencode-sessions-explorer` | Directory where searchable session content is materialized (the `by-session` and `by-channel` export trees that `ck` scans statelessly per call). |
+| `OPENCODE_SESSIONS_EXPLORER_EXPORT_ROOT` | `~/.local/share/opencode-sessions-explorer` | Directory where searchable session content is materialized (the `by-session` and `by-channel` export trees that `ck` scans statelessly per call, plus the `.last_sync` state file). |
 | `OPENCODE_SESSIONS_EXPLORER_TOOL_OUTPUT_DIR` | `$XDG_DATA_HOME/opencode/tool-output` (macOS/Linux) or `%LOCALAPPDATA%\opencode\tool-output` (Windows); falls back to `~/.local/share/opencode/tool-output` | Whitelist root for `get-part` dereference. Only files resolving inside this root may be read when `dereference_output_path:true`; any other path is rejected with `PATH_TRAVERSAL`. |
 | `OPENCODE_SESSIONS_EXPLORER_CK_BIN` | `ck` discovered on `PATH` | Absolute path to the `ck` binary. Set this when `ck` is installed outside `PATH`; only `search-text` and `grep-session` use it. |
 
@@ -79,8 +105,9 @@ exercise the suite against real session data instead, opt in with:
 OPENCODE_SESSIONS_EXPLORER_LIVE=1 bun test
 ```
 
-Live runs read real `ses_`/`msg_`/`prt_` ids and minimum counts from your own
-history, so failures there reflect local data rather than a regression. This switch
+Live runs read real `ses_`/`msg_` ids, synthesized `msg_…#N` part ids, and minimum
+counts from `tests/fixtures.json` (recorded on the author's machine) against your
+own history, so failures there reflect local data rather than a regression. This switch
 is for contributors only and has no effect on the plugin at runtime; see the
 [Development Guide](../maintainers/development.md) for the full contributor loop.
 

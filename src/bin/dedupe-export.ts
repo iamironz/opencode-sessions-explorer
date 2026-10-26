@@ -31,10 +31,10 @@ for (const ses of sessions) {
   const dir = join(root, ses)
   let files: string[]
   try { files = readdirSync(dir) } catch { continue }
-  // Group by part_id; track all seq variants
+  // Group by part_id; track all seq variants (V4 part ids: msg_…#N)
   const byPartId = new Map<string, { seq: number; filename: string }[]>()
   for (const f of files) {
-    const m = /^(\d{5})-(prt_[A-Za-z0-9_-]+)\.txt$/.exec(f)
+    const m = /^(\d{5})-(msg_[A-Za-z0-9_-]+#\d+)\.txt$/.exec(f)
     if (!m) continue
     const seq = Number(m[1])
     const partId = m[2]

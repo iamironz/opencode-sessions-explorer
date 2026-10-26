@@ -8,14 +8,17 @@ again, using the one tool in this plugin that writes to the database.
 ## Mental Model
 
 `unarchive-session` is the only write surface in an otherwise read-only plugin. It
-does two things in a single isolated write:
+does two things in a single isolated write,
+`UPDATE session_v2 SET time_archived = NULL, time_updated = <now>`:
 
 1. **Clears `time_archived`** so the session is no longer marked archived.
 2. **Refreshes `time_updated`** so the session resurfaces at the top of OpenCode's
    recency-ordered list.
 
-The `time_updated` bump is required, not cosmetic. OpenCode loads sessions ordered
-by `time_updated DESC` with a default limit of ~100 per directory. Clearing
+The `time_updated` bump is required, not cosmetic. The V2 session picker
+(`SessionStore.list`) loads `session_v2` ordered by `time_updated DESC, id DESC`,
+hides archived rows via `time_archived IS NULL`, and keeps a default window of ~100
+per directory. Clearing
 `time_archived` alone leaves a long-archived session buried below that window, so the
 app still fails to retrieve it with "Unable to retrieve session". Refreshing
 `time_updated` is also the intuitive meaning of "restore". Because it always
@@ -26,7 +29,8 @@ session and is idempotent in effect (active and at the top).
 
 OpenCode exposes no archive/unarchive endpoint that can clear the flag: the HTTP
 `UpdatePayload` types `time.archived` as a finite number and the handler ignores
-`undefined`, so a clear cannot be sent over the wire. The `opencode session` CLI
+`undefined`, so a clear cannot be sent over the wire (verified against the
+v1.15.12 source; the V2 API exposes no clear either). The `opencode session` CLI
 only offers list and delete. A direct database write is therefore the only
 mechanism. Reads still go through the shared read-only handle; the write goes through
 a separate, short-lived read-write connection used only by this tool.

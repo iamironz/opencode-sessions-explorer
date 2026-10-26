@@ -2,9 +2,10 @@
  * Tool registry — all 18 opencode-sessions-explorer tools, keyed by their public tool name.
  * 17 are read-only; `unarchive-session` is the lone write tool.
  *
- * The Plugin function in `src/plugin.ts` returns this map under the `tool:` key
- * of its hooks object, which is how OpenCode registers them with the LLM at
- * session start.
+ * Each entry is a V2 host tool (JSON Schema `input` + `{ content }` execute)
+ * that also carries its source args schema under `args` (used by tests and
+ * src/mcp.ts). The plugin entry registers every value through
+ * `ctx.tool.transform(editor => editor.add(...))`.
  */
 import { costByPeriod } from "./cost-by-period.js"
 import { costByProject } from "./cost-by-project.js"

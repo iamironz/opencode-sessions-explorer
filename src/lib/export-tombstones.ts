@@ -1,8 +1,9 @@
 import { existsSync, readdirSync, rmSync, statSync, unlinkSync } from "node:fs"
 import { join } from "node:path"
-import { CHANNELS, type SearchChannel } from "./channel.js"
+import { CHANNELS, OBSOLETE_CHANNELS, type SearchChannel } from "./channel.js"
 import { stmt } from "./db.js"
 import { SEARCHABLE_TYPES } from "./export-constants.js"
+import { messageToParts, partIdOf, type V2MessageRow } from "./v2-parts.js"
 
 export type TombstoneProgress = {
   scanned_sessions: number
@@ -11,7 +12,10 @@ export type TombstoneProgress = {
   removed_channel_sessions: number
 }
 
-const PART_FILE_RE = /^(?:\d{5}-)?(prt_[A-Za-z0-9_-]+)\.txt$/
+/** V4 part files: `<seq5>-<msgId>#<idx>.txt` (part ids are synthesized). */
+const PART_FILE_RE = /^(?:\d{5}-)?(msg_[A-Za-z0-9_-]+#\d+)\.txt$/
+/** Pre-V4 part files (V1 `part` table ids) — always orphans under the V2 engine. */
+const LEGACY_PART_FILE_RE = /^(?:\d{5}-)?(prt_[A-Za-z0-9_-]+)\.txt$/
 
 export function reconcileTombstones(root: string, heartbeat: () => void = () => {}): TombstoneProgress {
   const progress: TombstoneProgress = {
@@ -39,7 +43,15 @@ export function reconcileTombstones(root: string, heartbeat: () => void = () => 
     }
   }
   progress.removed_channel_sessions += removeOrphanChannelSessions(root, sessions, heartbeat)
+  removeObsoleteChannelDirs(root)
   return progress
+}
+
+/** Drop whole channel trees older releases wrote for part types V2 never produces. */
+function removeObsoleteChannelDirs(root: string): void {
+  for (const channel of OBSOLETE_CHANNELS) {
+    rmSync(join(root, "by-channel", channel), { recursive: true, force: true })
+  }
 }
 
 function removeOrphanPartFiles(root: string, sessionId: string, dir: string, heartbeat: () => void): number {
@@ -47,6 +59,17 @@ function removeOrphanPartFiles(root: string, sessionId: string, dir: string, hea
   let removed = 0
   for (const file of safeReadDir(dir)) {
     heartbeat()
+    const legacy = LEGACY_PART_FILE_RE.exec(file)
+    if (legacy) {
+      // V1-era export keyed on the frozen `part` table — remove (and its
+      // channel mirrors); the V2 engine re-exports from session_message.
+      try {
+        unlinkSync(join(dir, file))
+        removeChannelPartFiles(root, sessionId, legacy[1]!)
+        removed++
+      } catch { /* best effort */ }
+      continue
+    }
     const partId = partIdFromFile(file)
     if (!partId || livePartIds.has(partId)) continue
     try {
@@ -97,19 +120,34 @@ function channelDir(root: string, channel: SearchChannel, sessionId: string): st
 }
 
 function loadSessionIds(): Set<string> {
-  const rows = stmt(`SELECT id FROM session`).all() as { id: string }[]
+  const rows = stmt(`SELECT id FROM session_v2`).all() as { id: string }[]
   return new Set(rows.map((row) => row.id))
 }
 
+/**
+ * Live searchable part ids for one session under the V2 enumeration:
+ * assistant content items of searchable type + user/system/synthetic text
+ * parts (compaction markers are not searchable).
+ */
 function loadSearchablePartIds(sessionId: string): Set<string> {
-  const placeholders = SEARCHABLE_TYPES.map(() => "?").join(",")
+  const out = new Set<string>()
   const rows = stmt(`
-    SELECT id
-      FROM part
+    SELECT id, session_id, type, seq, time_created, time_updated, data
+      FROM session_message
      WHERE session_id = ?
-       AND json_extract(data,'$.type') IN (${placeholders})
-  ORDER BY id ASC`).all(sessionId, ...SEARCHABLE_TYPES) as { id: string }[]
-  return new Set(rows.map((row) => row.id))
+  ORDER BY id ASC`).all(sessionId) as V2MessageRow[]
+  for (const row of rows) {
+    for (const part of messageToParts(row)) {
+      if (isSearchable(part.type)) out.add(partIdOf(row.id, part.index))
+    }
+  }
+  return out
+}
+
+const SEARCHABLE: ReadonlySet<string> = new Set(SEARCHABLE_TYPES)
+
+function isSearchable(type: string): boolean {
+  return SEARCHABLE.has(type)
 }
 
 function safeReadDir(dir: string): string[] {

@@ -83,8 +83,8 @@ describe("db_stats", () => {
     expect(r.ok).toBe(true)
     expect(r.data.json1_ok).toBe(true)
     expect(r.data.hard_drift.length).toBe(0)
-    expect(r.data.table_counts.session).toBeGreaterThan(F.expected_counts.session_min)
-    expect(r.data.table_counts.part).toBeGreaterThan(F.expected_counts.part_min)
+    expect(r.data.table_counts["session_v2"]).toBeGreaterThan(F.expected_counts.session_min)
+    expect(r.data.table_counts["session_message"]).toBeGreaterThan(F.expected_counts.message_min)
     expect(r.data.busy_timeout_ms).toBeGreaterThanOrEqual(5000)
     expect(r.data.migrations_head).toContain("2026")
   })
@@ -297,13 +297,14 @@ describe("get_part", () => {
     expect(r.ok).toBe(false)
     expect(r.error?.code).toBe("NOT_FOUND")
   })
-  test("GP-L big patch — capped (by-count + by-bytes)", async () => {
+  test("GP-L big tool input — capped (input truncation + by-bytes)", async () => {
     const r = await runTool(getPart, { part_id: F.parts.big_5mb_patch, max_bytes: 4096 })
     expect(r.ok).toBe(true)
     expect(r.data.truncated).toBe(true)
-    expect(r.data.truncated_fields.some((f: string) => f.startsWith("files"))).toBe(true)
-    // Fixture's patch JSON is several KB (>200 files); live corpus has multi-MB
-    // blobs. Assert the body exceeded max_bytes (so it was genuinely truncated).
+    // V2: the oversized fixture is a tool item with a huge JSON input object.
+    expect(r.data.truncated_fields.some((f: string) => f === "input")).toBe(true)
+    // Fixture's canonical JSON is several KB; live corpus has multi-MB blobs.
+    // Assert the body exceeded max_bytes (so it was genuinely truncated).
     expect(r.data.original_bytes).toBeGreaterThan(4096)
     expect(r.meta.bytes_returned).toBeLessThan(128 * 1024)
   })
@@ -541,7 +542,7 @@ describe.skipIf(!LIVE)("grep_session", () => {
     const r = await runTool(grepSession, { session_id: F.sessions.active, pattern: F.phrases.active_known, limit: 10 })
     expect(r.ok).toBe(true)
     expect(r.data.matches.length).toBeGreaterThan(0)
-    for (const m of r.data.matches) if (m.part_id) expect(m.part_id).toMatch(/^prt_/)
+    for (const m of r.data.matches) if (m.part_id) expect(m.part_id).toMatch(/^msg_[A-Za-z0-9_-]+#\d+$/)
   }, 30000)
   test("GR-E pattern absent", async () => {
     const r = await runTool(grepSession, { session_id: F.sessions.active, pattern: "__nothingmatcheszzz__" })
@@ -587,7 +588,7 @@ describe.skipIf(!LIVE)("search_text", () => {
     expect(Array.isArray(r.data.channels)).toBe(true)
     for (const h of r.data.hits) {
       expect(h.session_id).toBe(F.sessions.active)
-      if (h.part_id) expect(h.part_id).toMatch(/^prt_/)
+      if (h.part_id) expect(h.part_id).toMatch(/^msg_[A-Za-z0-9_-]+#\d+$/)
     }
   }, 30000)
   test("TX-F forensic surface uses raw channel", async () => {
@@ -634,14 +635,14 @@ import { runExport, getSyncState, _resetExportCacheForTest, exportRoot } from ".
 import { readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs"
 import { join } from "node:path"
 describe.skipIf(!LIVE)("L2 export update propagation", () => {
-  test("RX-H .last_sync uses v3 schema (id + session cursor state)", () => {
+  test("RX-H .last_sync uses v4 schema (id + session cursor state)", () => {
     const root = exportRoot()
     const p = join(root, ".last_sync")
     if (existsSync(p)) {
       const raw = readFileSync(p, "utf8").trim()
       const state = getSyncState(root)
-      expect(raw.startsWith("v3 ")).toBe(true)
-      expect(state.schema).toBe("v3")
+      expect(raw.startsWith("v4 ")).toBe(true)
+      expect(state.schema).toBe("v4")
       expect(typeof state.insert_cursor.id).toBe("string")
       if (state.session_cursor) {
         expect(Number.isFinite(state.session_cursor.ts)).toBe(true)
@@ -666,10 +667,10 @@ describe.skipIf(!LIVE)("L2 export update propagation", () => {
     // Reset in-process file index so next sync re-reads the dir
     _resetExportCacheForTest()
 
-    // Position the v3 session-dirty cursor just before the target session's
-    // (time_updated,id) point, while advancing the insert id cursor past known parts.
+    // Position the v4 session-dirty cursor just before the target session's
+    // (time_updated,id) point, while advancing the insert id cursor past known messages.
     const { stmt: dbStmt } = await import("../src/lib/db.ts")
-    const row = dbStmt(`SELECT time_updated FROM session WHERE id = ?`).get(sesId) as any
+    const row = dbStmt(`SELECT time_updated FROM session_v2 WHERE id = ?`).get(sesId) as any
     expect(row).toBeTruthy()
     const cursor = { ts: Number(row.time_updated) - 1, id: "zzzzzz" }
 
@@ -684,13 +685,12 @@ describe.skipIf(!LIVE)("L2 export update propagation", () => {
     expect(restored).not.toBe(sentinel)
     expect(restored).toContain("PART_ID: " + partId)
   }, 30000)
-  test("RX-U updated parts (time_updated > time_created) get picked up by delta sync", () => {
-    // Reality check: SQL ground truth says >50% of parts have time_updated > time_created.
-    // v3 tracks part inserts by id and updated sessions by (time_updated,id), so
-    // updated parts propagate through the session-dirty cursor instead of a global
-    // part time_updated cursor.
+  test("RX-U updated messages get picked up by delta sync", () => {
+    // V4 tracks message inserts by id and updated sessions by (time_updated,id),
+    // so updated messages propagate through the session-dirty cursor instead of
+    // a global message time_updated cursor.
     const state = getSyncState()
-    expect(state.schema).toBe("v3")
+    expect(state.schema).toBe("v4")
     expect(state.session_cursor).not.toBeNull()
     expect(state.session_cursor!.ts).toBeGreaterThan(1_770_000_000_000) // recent epoch
     expect(typeof state.session_cursor!.id).toBe("string")

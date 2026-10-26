@@ -4,12 +4,24 @@
  * Time-bucketed cost + tokens. Buckets in UTC; optional `tz_offset_min`
  * to shift bucket boundaries (e.g. for "my day"). Cap: 32 KB.
  */
-import { tool } from "@opencode-ai/plugin"
 import { stmt } from "../lib/db.js"
 import { runWithEnvelope } from "../lib/envelope.js"
 import { table } from "../lib/table.js"
+import { defineTool } from "../lib/tool-v2.js"
 
-export const costByPeriod = tool({
+export const costByPeriod = defineTool<{
+  bucket: "day" | "week" | "month"
+  since_ms?: number
+  until_ms?: number
+  project_id?: string
+  agent?: string
+  tz_offset_min: number
+  archived: "no" | "only" | "any"
+  min_cost: number
+  include_zero_buckets: boolean
+  max_buckets: number
+}>({
+  name: "opencode-sessions-explorer-cost-by-period",
   description:
     "opencode-sessions-explorer: time-series OpenCode cost + tokens, bucketed by day, week, or month. " +
     "Answers: \"how much did I spend each day this week\", \"my OpenCode cost trend\", \"weekly token usage chart\", \"monthly spend over the last quarter\", \"daily activity by cost\", \"how has my OpenCode usage changed over time\", \"spend per period\", \"which day did I burn the most tokens\". " +
@@ -17,16 +29,20 @@ export const costByPeriod = tool({
     "Returns: buckets array (each: period string, sessions count, cost, tokens) newest-first, plus a total summary. Optional project_id/agent filters for scoping. " +
     "For NON-TIME-SERIES grouping (by project/agent/model regardless of time) use cost-by-project instead.",
   args: {
-    bucket: tool.schema.enum(["day", "week", "month"]).default("day"),
-    since_ms: tool.schema.number().int().nonnegative().optional(),
-    until_ms: tool.schema.number().int().nonnegative().optional(),
-    project_id: tool.schema.string().optional(),
-    agent: tool.schema.string().optional(),
-    tz_offset_min: tool.schema.number().int().min(-720).max(840).default(0).describe("Bucket boundary offset in minutes (e.g. 60 for UTC+1)"),
-    archived: tool.schema.enum(["no", "only", "any"]).default("any"),
-    min_cost: tool.schema.number().nonnegative().default(0).describe("Hide buckets below this USD cost"),
-    include_zero_buckets: tool.schema.boolean().default(false).describe("Include buckets where both cost and tokens are zero, usually pre-usage-migration data"),
-    max_buckets: tool.schema.number().int().min(1).max(366).default(60),
+    type: "object",
+    properties: {
+      bucket: { type: "string", enum: ["day", "week", "month"], default: "day" },
+      since_ms: { type: "integer", minimum: 0 },
+      until_ms: { type: "integer", minimum: 0 },
+      project_id: { type: "string" },
+      agent: { type: "string" },
+      tz_offset_min: { type: "integer", minimum: -720, maximum: 840, default: 0, description: "Bucket boundary offset in minutes (e.g. 60 for UTC+1)" },
+      archived: { type: "string", enum: ["no", "only", "any"], default: "any" },
+      min_cost: { type: "number", minimum: 0, default: 0, description: "Hide buckets below this USD cost" },
+      include_zero_buckets: { type: "boolean", default: false, description: "Include buckets where both cost and tokens are zero, usually pre-usage-migration data" },
+      max_buckets: { type: "integer", minimum: 1, maximum: 366, default: 60 },
+    },
+    required: [],
   },
   async execute(args) {
     return runWithEnvelope("cost_by_period", 32, async () => {
@@ -58,7 +74,7 @@ export const costByPeriod = tool({
                SUM(tokens_input) AS tokens_input,
                SUM(tokens_output) AS tokens_output,
                SUM(tokens_reasoning) AS tokens_reasoning
-          FROM session
+          FROM session_v2
           ${whereSql}
        GROUP BY period
        ${having.length ? "HAVING " + having.join(" AND ") : ""}

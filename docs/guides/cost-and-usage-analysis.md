@@ -7,8 +7,9 @@ recurring failures and repeated prompts.
 
 ## Mental Model
 
-All four tools aggregate the `session` and `part` tables directly — no export tree
-or `ck` required. Pick the tool by the shape of the answer you want:
+All four tools aggregate the V2 tables directly — `session_v2` for cost and token
+totals, `session_message` (with tool calls read inline from `data.content[]`) for
+failures and prompts — no export tree or `ck` required. Pick the tool by the shape of the answer you want:
 
 - **Spend by dimension** — `cost-by-project` groups by project, directory, agent, or
   model.
@@ -60,6 +61,10 @@ zero-valued buckets unless you pass `include_zero_buckets: true`. Treat a zero w
    ```json
    { "group_by": "tool", "limit": 20 }
    ```
+
+   Tools renamed by OpenCode V2 are merged into one bucket under the V2 name:
+   V1-era `bash` and V2 `shell` failures count as `shell`, `task` and `subagent`
+   as `subagent` (see [Tool-Name Aliases](../reference/tools.md#tool-name-aliases)).
 
 1. Detect duplicated work by clustering opening prompts:
 

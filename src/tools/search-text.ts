@@ -1,4 +1,3 @@
-import { tool } from "@opencode-ai/plugin"
 import { stmt } from "../lib/db.js"
 import { runWithEnvelope, fail } from "../lib/envelope.js"
 import { runCk, type CkScopeCoverage } from "../lib/ck.js"
@@ -9,13 +8,34 @@ import { truncateString, redactSecrets, snippet as makeSnippet } from "../lib/tr
 import { decodeModel } from "../lib/decode.js"
 import { CHANNELS, channelsForSurface, channelWeight, inferSurface, looksLikeExactIdentifier, normalizeForDedupe, type SearchChannel, type SearchSurface } from "../lib/channel.js"
 import { table } from "../lib/table.js"
+import { defineTool } from "../lib/tool-v2.js"
+import { messageToParts, parsePartId, type V2MessageRow } from "../lib/v2-parts.js"
 
-export const searchText = tool({
+export const searchText = defineTool<{
+  q: string
+  surface: SearchSurface
+  channels?: readonly SearchChannel[]
+  group_by_session?: boolean
+  role: "user" | "assistant" | "any"
+  session_ids?: readonly string[]
+  project_id?: string
+  agent?: string
+  since_ms?: number
+  until_ms?: number
+  archived: "no" | "only" | "any"
+  limit: number
+  fixed_string: boolean
+  case_sensitive: boolean
+  timeout_ms: number
+  redact: boolean
+} & Record<string, unknown>>({
+  name: "opencode-sessions-explorer-search-text",
+  removedArgs: { mode: "mode is not supported by search-text (semantic modes were removed); search always uses regex — remove this parameter" },
   description:
-    "opencode-sessions-explorer: full-text search across the BODIES of all your prior OpenCode sessions (the actual conversation content — user prompts, assistant responses, tool inputs/outputs, reasoning, file references, patches, subtask prompts). " +
+    "opencode-sessions-explorer: full-text search across the BODIES of all your prior OpenCode sessions (the actual conversation content — user prompts, assistant responses, tool inputs/outputs, reasoning). " +
     "Answers any of: \"where in my OpenCode history did I mention X\", \"find sessions about Y\", \"have I ever discussed Z\", \"look up earlier conversations about W\", \"all references to V across my OpenCode sessions\", \"did this topic come up before\", \"when did I last talk about Q\", \"find the session where I worked on R\", \"search my prior chat content for S\", \"grep across all OpenCode sessions for T\", \"have I asked about this before\". " +
     "Default surface is `recall`: session-first, channel-aware, and evidence-limited. It searches high-signal conversation/session-summary views first and returns ranked sessions with raw part refs. " +
-    "Use `surface:'forensics'` (or explicit channels including `raw`) for exhaustive raw replay over tool output, reasoning, patches, and all exported bodies. " +
+    "Use `surface:'forensics'` (or explicit channels including `raw`) for exhaustive raw replay over tool output, reasoning, and all exported bodies. " +
     "ARG `group_by_session`: when true, rolls hits up to one row per session with hit_count, first/last seen timestamps, evidence snippets, and channel counts. If omitted, unscoped recall defaults to true; scoped one-session searches default to flat hits. " +
     "CRITICAL ARG `role` (default 'any'): which message roles to search inside. **Default to 'any'** for natural-language questions like \"where did I mention X\", \"find sessions about Y\", \"did I discuss Z\" — these are asking about appearances ANYWHERE in your conversations (user prompts AND assistant text AND tool I/O AND reasoning). " +
     "Only set role='user' when the user EXPLICITLY narrows to authored messages: \"what prompts have I typed containing X\", \"my user-authored messages mentioning Y\", \"questions I sent OpenCode with Z\". Phrases like \"did I mention\" / \"in my history\" / \"have I discussed\" do NOT imply role='user' — those are asking about the corpus as a whole. " +
@@ -24,22 +44,26 @@ export const searchText = tool({
     "Pre-filter cross-session searches via session_ids[], project_id, agent, since_ms/until_ms — unscoped full-corpus search can take 10-30 seconds. Scoped searches return in <1s. " +
     "For grep INSIDE a single known session use grep-session instead (faster, narrower).",
   args: {
-    q: tool.schema.string().describe("Search query (regex pattern)"),
-    surface: tool.schema.enum(["recall", "debug_trace", "tool_audit", "code", "forensics"]).default("recall").describe("Retrieval preset. recall is curated/default; forensics searches raw replay data."),
-    channels: tool.schema.array(tool.schema.enum(CHANNELS)).optional().describe("Override surface-derived channels. Use raw for current full-fidelity behavior."),
-    group_by_session: tool.schema.boolean().optional().describe("If true, return one entry per matching session with evidence snippets instead of one entry per part. Defaults true for unscoped recall and false for scoped/forensic searches."),
-    role: tool.schema.enum(["user", "assistant", "any"]).default("any").describe("Restrict hits to parts attached to messages of this role. 'user' = only what the human typed; 'assistant' = only assistant output."),
-    session_ids: tool.schema.array(tool.schema.string()).optional().describe("Restrict to these session IDs (recommended for cross-session speed)"),
-    project_id: tool.schema.string().optional(),
-    agent: tool.schema.string().optional(),
-    since_ms: tool.schema.number().int().nonnegative().optional(),
-    until_ms: tool.schema.number().int().nonnegative().optional(),
-    archived: tool.schema.enum(["no", "only", "any"]).default("any"),
-    limit: tool.schema.number().int().min(1).max(50).default(20).describe("Max RESULTS (hits or sessions depending on group_by_session)"),
-    fixed_string: tool.schema.boolean().default(false),
-    case_sensitive: tool.schema.boolean().default(false),
-    timeout_ms: tool.schema.number().int().min(1000).max(60000).default(20000),
-    redact: tool.schema.boolean().default(true),
+    type: "object",
+    properties: {
+      q: { type: "string", description: "Search query (regex pattern)" },
+      surface: { type: "string", enum: ["recall", "debug_trace", "tool_audit", "code", "forensics"], default: "recall", description: "Retrieval preset. recall is curated/default; forensics searches raw replay data." },
+      channels: { type: "array", items: { type: "string", enum: [...CHANNELS] }, description: "Override surface-derived channels. Use raw for current full-fidelity behavior." },
+      group_by_session: { type: "boolean", description: "If true, return one entry per matching session with evidence snippets instead of one entry per part. Defaults true for unscoped recall and false for scoped/forensic searches." },
+      role: { type: "string", enum: ["user", "assistant", "any"], default: "any", description: "Restrict hits to parts attached to messages of this role. 'user' = only what the human typed; 'assistant' = only assistant output." },
+      session_ids: { type: "array", items: { type: "string" }, description: "Restrict to these session IDs (recommended for cross-session speed)" },
+      project_id: { type: "string" },
+      agent: { type: "string" },
+      since_ms: { type: "integer", minimum: 0 },
+      until_ms: { type: "integer", minimum: 0 },
+      archived: { type: "string", enum: ["no", "only", "any"], default: "any" },
+      limit: { type: "integer", minimum: 1, maximum: 50, default: 20, description: "Max RESULTS (hits or sessions depending on group_by_session)" },
+      fixed_string: { type: "boolean", default: false },
+      case_sensitive: { type: "boolean", default: false },
+      timeout_ms: { type: "integer", minimum: 1000, maximum: 60000, default: 20000 },
+      redact: { type: "boolean", default: true },
+    },
+    required: ["q"],
   },
   async execute(args) {
     return runWithEnvelope("search_text", 160, async (ctx) => {
@@ -47,7 +71,7 @@ export const searchText = tool({
         fail("BAD_ARGS", "mode is not supported by search-text", "Remove mode; search-text always uses regex.")
       }
       const surface = inferSurface(args.q, args.surface as SearchSurface)
-      const channels = normalizeChannels(args.channels?.length ? args.channels : channelsForSurface(surface, args.q))
+      const channels = normalizeChannels(args.channels?.length ? (args.channels as SearchChannel[]) : channelsForSurface(surface, args.q))
       const groupBySession = args.group_by_session ?? (surface !== "forensics" && !args.session_ids?.length)
 
       const scopeIds = resolveScope(args)
@@ -109,7 +133,7 @@ function resolveScope(args: any): "all" | string[] {
   if (where.length === 0) return "all"
   // Bump to 5000 so a since/until_ms or other filter doesn't accidentally exclude
   // older sessions where the search term may legitimately live.
-  const sql = `SELECT id FROM session WHERE ${where.join(" AND ")} ORDER BY time_updated DESC LIMIT 5000`
+  const sql = `SELECT id FROM session_v2 WHERE ${where.join(" AND ")} ORDER BY time_updated DESC LIMIT 5000`
   const rows = stmt(sql).all(...params) as { id: string }[]
   return rows.map((r) => r.id)
 }
@@ -177,22 +201,14 @@ async function runWithCk(args: any, scopes: string[], ctx: any, sessionCount: nu
   type ParsedHit = ReturnType<typeof parsePath> & { ck: typeof ck.hits[0] }
   const parsed: ParsedHit[] = ck.hits.map((h) => ({ ...parsePath(h.path), ck: h }))
 
-  // Batch-fetch part metadata (one query for all part_ids)
-  const partIds = parsed.map((p) => p.partId).filter((x): x is string => !!x)
-  const partInfo = new Map<string, { id: string; message_id: string; time_created: number; type: string }>()
-  if (partIds.length > 0) {
-    const placeholders = partIds.map(() => "?").join(",")
-    const rows = stmt(`SELECT id, message_id, time_created, json_extract(data,'$.type') AS type FROM part WHERE id IN (${placeholders})`).all(...partIds) as any[]
-    for (const r of rows) partInfo.set(r.id, r)
-  }
-
-  // Batch-fetch message.role per message_id (for role filter)
-  const msgIds = Array.from(new Set(Array.from(partInfo.values()).map((p) => p.message_id)))
-  const roleByMsg = new Map<string, string>()
+  // V2 enrichment: part ids are <msgId>#<idx> — batch-fetch the owning
+  // messages once, then derive role/part_type/ts from the content items.
+  const msgIds = Array.from(new Set(parsed.map((p) => p.partId).filter((x): x is string => !!x).map((pid) => parsePartId(pid)!.messageId)))
+  const msgInfo = new Map<string, { row: V2MessageRow; parts: ReturnType<typeof messageToParts> }>()
   if (msgIds.length > 0) {
     const placeholders = msgIds.map(() => "?").join(",")
-    const rows = stmt(`SELECT id, json_extract(data,'$.role') AS role FROM message WHERE id IN (${placeholders})`).all(...msgIds) as any[]
-    for (const r of rows) roleByMsg.set(r.id, r.role ?? "unknown")
+    const rows = stmt(`SELECT id, session_id, type, seq, time_created, time_updated, data FROM session_message WHERE id IN (${placeholders})`).all(...msgIds) as V2MessageRow[]
+    for (const r of rows) msgInfo.set(r.id, { row: r, parts: messageToParts(r) })
   }
 
   // Batch-fetch session metadata per session_id
@@ -200,15 +216,16 @@ async function runWithCk(args: any, scopes: string[], ctx: any, sessionCount: nu
   const sessInfo = new Map<string, any>()
   if (sessIds.length > 0) {
     const placeholders = sessIds.map(() => "?").join(",")
-    const rows = stmt(`SELECT id, title, project_id, directory, agent, model, time_archived, time_updated FROM session WHERE id IN (${placeholders})`).all(...sessIds) as any[]
+    const rows = stmt(`SELECT id, title, project_id, directory, agent, model, time_archived, time_updated FROM session_v2 WHERE id IN (${placeholders})`).all(...sessIds) as any[]
     for (const r of rows) sessInfo.set(r.id, r)
   }
 
   // Build hits + apply role filter
   const allHits = parsed.map((p) => {
     const session = p.sessionId ? sessInfo.get(p.sessionId) : null
-    const part = p.partId ? partInfo.get(p.partId) : null
-    const role = part ? (roleByMsg.get(part.message_id) ?? null) : null
+    const part = p.partId ? msgInfo.get(parsePartId(p.partId)!.messageId) : null
+    const partMeta = part ? part.parts.find((x) => x.partId === p.partId) : undefined
+    const role = part ? part.row.type : null
     let snippet = centerSnippet(p.ck.snippet ?? "", args.q)
     if (args.redact) snippet = redactSecrets(snippet)
     const score = scoreHit({ channel: p.channel, role, ckScore: p.ck.score ?? null, title: session?.title ?? "", q: args.q })
@@ -216,10 +233,10 @@ async function runWithCk(args: any, scopes: string[], ctx: any, sessionCount: nu
       session_id: p.sessionId,
       channel: p.channel,
       part_id: p.partId,
-      part_type: part?.type ?? null,
-      message_id: part?.message_id ?? null,
+      part_type: partMeta?.type ?? null,
+      message_id: part?.row.id ?? null,
       role,
-      ts: part?.time_created ?? session?.time_updated ?? null,
+      ts: partMeta?.ts ?? session?.time_updated ?? null,
       score,
       raw_score: p.ck.score ?? null,
       line_start: p.ck.span?.line_start ?? null,
@@ -376,10 +393,10 @@ function warnOnPartialScopeCoverage(ctx: any, coverage: CkScopeCoverage, timeout
 }
 
 function parsePath(p: string): { sessionId: string | null; partId: string | null; channel: SearchChannel } {
-  const ch = /\/by-channel\/([^/]+)\/by-session\/(ses_[A-Za-z0-9_-]+)\/(?:summary\.txt|(?:\d{5}-)?(prt_[A-Za-z0-9_-]+)\.txt)$/.exec(p)
+  const ch = /\/by-channel\/([^/]+)\/by-session\/(ses_[A-Za-z0-9_-]+)\/(?:summary\.txt|(?:\d{5}-)?(msg_[A-Za-z0-9_-]+#\d+)\.txt)$/.exec(p)
   if (ch) return { sessionId: ch[2] ?? null, partId: ch[3] ?? null, channel: (ch[1] as SearchChannel) ?? "raw" }
   // Handles both the seq-prefixed scheme (default) and bare <part_id>.txt
-  const m = /\/by-session\/(ses_[A-Za-z0-9_-]+)\/(?:\d{5}-)?(prt_[A-Za-z0-9_-]+)\.txt$/.exec(p)
+  const m = /\/by-session\/(ses_[A-Za-z0-9_-]+)\/(?:\d{5}-)?(msg_[A-Za-z0-9_-]+#\d+)\.txt$/.exec(p)
   return { sessionId: m?.[1] ?? null, partId: m?.[2] ?? null, channel: "raw" }
 }
 

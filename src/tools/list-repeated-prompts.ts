@@ -4,15 +4,27 @@
  * Cluster sessions whose first user-prompt shares the same normalized prefix.
  * Useful for finding "I've asked this before" patterns.
  * Cap: 48 KB.
+ *
+ * V2: the first user prompt is the lowest-`seq` type='user' message; its text
+ * lives directly in `data.text`.
  */
-import { tool } from "@opencode-ai/plugin"
 import { stmt } from "../lib/db.js"
 import { runWithEnvelope } from "../lib/envelope.js"
 import { truncateString } from "../lib/truncate.js"
 import { normalizePrompt } from "../lib/channel.js"
 import { table } from "../lib/table.js"
+import { defineTool } from "../lib/tool-v2.js"
 
-export const listRepeatedPrompts = tool({
+export const listRepeatedPrompts = defineTool<{
+  since_ms?: number
+  until_ms?: number
+  min_count: number
+  prefix_chars: number
+  archived: "no" | "only" | "any"
+  limit: number
+  sample_per_group: number
+}>({
+  name: "opencode-sessions-explorer-list-repeated-prompts",
   description:
     "opencode-sessions-explorer: cluster OpenCode sessions by the prefix of their FIRST USER PROMPT, surfacing repeated patterns. " +
     "Answers: \"have I asked this question before\", \"my most repeated prompts\", \"common patterns in what I ask OpenCode\", \"cluster my prompts to find duplicates\", \"what do I tend to start sessions with\", \"top recurring prompt templates\", \"how often do I ask about the same thing\". " +
@@ -20,43 +32,41 @@ export const listRepeatedPrompts = tool({
     "Each cluster: prefix, count, first_ts, last_ts, total_cost, session_ids[], samples[] (sample_per_group full prompt previews). " +
     "Use this for usage-analysis questions. For exact content search across all session bodies use search-text.",
   args: {
-    since_ms: tool.schema.number().int().nonnegative().optional(),
-    until_ms: tool.schema.number().int().nonnegative().optional(),
-    min_count: tool.schema.number().int().min(2).default(3),
-    prefix_chars: tool.schema.number().int().min(20).max(512).default(80).describe("Prefix length defining the cluster (clamped 20..512)"),
-    archived: tool.schema.enum(["no", "only", "any"]).default("no"),
-    limit: tool.schema.number().int().min(1).max(50).default(20),
-    sample_per_group: tool.schema.number().int().min(1).max(5).default(2),
+    type: "object",
+    properties: {
+      since_ms: { type: "integer", minimum: 0 },
+      until_ms: { type: "integer", minimum: 0 },
+      min_count: { type: "integer", minimum: 2, default: 3 },
+      prefix_chars: { type: "integer", minimum: 20, maximum: 512, default: 80, description: "Prefix length defining the cluster (clamped 20..512)" },
+      archived: { type: "string", enum: ["no", "only", "any"], default: "no" },
+      limit: { type: "integer", minimum: 1, maximum: 50, default: 20 },
+      sample_per_group: { type: "integer", minimum: 1, maximum: 5, default: 2 },
+    },
+    required: [],
   },
   async execute(args) {
     return runWithEnvelope("list_repeated_prompts", 48, async () => {
-      const where: string[] = ["json_extract(m.data,'$.role') = 'user'"]
+      const where: string[] = ["m.type = 'user'"]
       const params: any[] = []
       if (args.since_ms !== undefined) { where.push("s.time_created >= ?"); params.push(args.since_ms) }
       if (args.until_ms !== undefined) { where.push("s.time_created <= ?"); params.push(args.until_ms) }
       if (args.archived === "no") where.push("s.time_archived IS NULL")
       else if (args.archived === "only") where.push("s.time_archived IS NOT NULL")
 
-      // Get first user message per session
+      // First user message per session (lowest seq), with its V2 data.text.
       const rows = stmt(`
         WITH first_user AS (
-          SELECT m.session_id, MIN(m.time_created) AS first_ts, MIN(m.id) AS first_msg
-            FROM message m
-            JOIN session s ON s.id = m.session_id
+          SELECT m.session_id, MIN(m.seq) AS first_seq
+            FROM session_message m
+            JOIN session_v2 s ON s.id = m.session_id
            WHERE ${where.join(" AND ")}
         GROUP BY m.session_id
         )
-        SELECT fu.session_id, fu.first_ts, s.title, s.cost,
-               (SELECT GROUP_CONCAT(COALESCE(json_extract(p.data,'$.text'), ''), ' ')
-                  FROM part p
-                 WHERE p.message_id = (SELECT id FROM message
-                                        WHERE session_id = fu.session_id
-                                          AND json_extract(data,'$.role') = 'user'
-                                        ORDER BY time_created, id
-                                        LIMIT 1)
-                   AND json_extract(p.data,'$.type') = 'text') AS prompt_text
+        SELECT fu.session_id, m.time_created AS first_ts, s.title, s.cost,
+               json_extract(m.data,'$.text') AS prompt_text
           FROM first_user fu
-          JOIN session s ON s.id = fu.session_id
+          JOIN session_v2 s ON s.id = fu.session_id
+          JOIN session_message m ON m.session_id = fu.session_id AND m.seq = fu.first_seq AND m.type = 'user'
       `).all(...params) as { session_id: string; first_ts: number; title: string; cost: number; prompt_text: string | null }[]
 
       // Normalize + cluster in TS

@@ -3,14 +3,23 @@
  *
  * Aggregate cost + tokens grouped by project_id / directory / agent / model.
  * Pre-`session_usage`-migration sessions have cost=0; we surface `cost_known:false`
- * per group when ALL its sessions are pre-migration. Cap: 32 KB.
+ * per group when ALL its sessions are pre-migration.
  */
-import { tool } from "@opencode-ai/plugin"
 import { stmt } from "../lib/db.js"
 import { runWithEnvelope } from "../lib/envelope.js"
 import { table } from "../lib/table.js"
+import { defineTool } from "../lib/tool-v2.js"
 
-export const costByProject = tool({
+export const costByProject = defineTool<{
+  group_by: "project_id" | "directory" | "agent" | "model"
+  since_ms?: number
+  until_ms?: number
+  archived: "no" | "only" | "any"
+  min_cost: number
+  min_tokens: number
+  top: number
+}>({
+  name: "opencode-sessions-explorer-cost-by-project",
   description:
     "opencode-sessions-explorer: aggregate OpenCode cost + token usage across sessions, grouped by project, directory, agent, or model. " +
     "Answers: \"how much have I spent on OpenCode\", \"what's my OpenCode API spend by project\", \"cost breakdown by agent\", \"which directory burned the most tokens\", \"Claude Opus vs GPT cost comparison\", \"my biggest spending categories\", \"billing summary\", \"token usage by agent\", \"which model is most expensive for me\", \"OpenCode cost audit\". " +
@@ -19,13 +28,17 @@ export const costByProject = tool({
     "cost_known is false when ALL sessions in a group predate the session_usage migration — their `cost` column reads as 0 but isn't actually $0. " +
     "For TIME-SERIES (cost over time per period) use cost-by-period instead.",
   args: {
-    group_by: tool.schema.enum(["project_id", "directory", "agent", "model"]).default("project_id"),
-    since_ms: tool.schema.number().int().nonnegative().optional(),
-    until_ms: tool.schema.number().int().nonnegative().optional(),
-    archived: tool.schema.enum(["no", "only", "any"]).default("any"),
-    min_cost: tool.schema.number().nonnegative().default(0.001).describe("Hide groups below this USD cost by default"),
-    min_tokens: tool.schema.number().int().nonnegative().default(0).describe("Hide groups below this input+output token count"),
-    top: tool.schema.number().int().min(1).max(50).default(20),
+    type: "object",
+    properties: {
+      group_by: { type: "string", enum: ["project_id", "directory", "agent", "model"], default: "project_id" },
+      since_ms: { type: "integer", minimum: 0 },
+      until_ms: { type: "integer", minimum: 0 },
+      archived: { type: "string", enum: ["no", "only", "any"], default: "any" },
+      min_cost: { type: "number", minimum: 0, default: 0.001, description: "Hide groups below this USD cost by default" },
+      min_tokens: { type: "integer", minimum: 0, default: 0, description: "Hide groups below this input+output token count" },
+      top: { type: "integer", minimum: 1, maximum: 50, default: 20 },
+    },
+    required: [],
   },
   async execute(args) {
     return runWithEnvelope("cost_by_project", 32, async () => {
@@ -46,8 +59,10 @@ export const costByProject = tool({
       const having: string[] = []
       if (args.min_cost > 0) having.push("SUM(cost) >= ?")
       if (args.min_tokens > 0) having.push("(SUM(tokens_input) + SUM(tokens_output)) >= ?")
+      // NOTE: alias must not be `key` — SQLite 3.53 mis-groups json_extract
+      // expressions aliased as `key` (keyword collision); `grp` is safe.
       const sql = `
-        SELECT ${keyExpr} AS key,
+        SELECT ${keyExpr} AS grp,
                COUNT(*) AS sessions,
                ROUND(SUM(cost), 6) AS cost,
                SUM(tokens_input) AS tokens_input,
@@ -58,9 +73,9 @@ export const costByProject = tool({
                SUM(CASE WHEN cost > 0 OR tokens_input > 0 THEN 1 ELSE 0 END) AS known_count,
                MIN(time_created) AS first_ts,
                MAX(time_updated) AS last_ts
-          FROM session
+          FROM session_v2
           ${whereSql}
-       GROUP BY key
+       GROUP BY grp
        ${having.length ? "HAVING " + having.join(" AND ") : ""}
        ORDER BY cost DESC
           LIMIT ?`
@@ -70,7 +85,7 @@ export const costByProject = tool({
       const rows = stmt(sql).all(...params) as any[]
 
       const records = rows.map((r) => ({
-        key: r.key,
+        key: r.grp,
         sessions: Number(r.sessions),
         cost: Number(r.cost ?? 0),
         cost_known: Number(r.known_count) > 0,

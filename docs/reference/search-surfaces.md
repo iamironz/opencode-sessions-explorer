@@ -21,7 +21,7 @@ is `recall`.
 | `recall` | `conversation`, `session-summary` | Default. Session-first, high-signal recall — "where did I mention X", "find sessions about Y". |
 | `debug_trace` | `conversation`, `session-summary`, `tool-error`, `tool-input-summary` | Investigating failures and what led to them — errors, exceptions, stack traces, logs. |
 | `tool_audit` | `tool-input-summary`, `tool-error` | Auditing tool usage — bash commands, tool calls, MCP calls, and their errors. |
-| `code` | `conversation`, `session-summary`, `code-touch`, `patch-summary`, `tool-input-summary` | Tracing file and code changes — paths, diffs, edits, patches. |
+| `code` | `conversation`, `session-summary`, `code-touch`, `tool-input-summary` | Tracing file and code changes — paths, diffs, edits, patches. |
 | `forensics` | `raw` | Exhaustive replay over raw exported bodies, including full tool output and reasoning. Slowest; use when curated channels miss something. |
 
 ### Surface Inference
@@ -47,16 +47,23 @@ Channels are the derived views the export tree materializes under
 
 | Channel | Contents |
 | --- | --- |
-| `conversation` | User and assistant text, plus subtask prompts. |
+| `conversation` | User, system, and assistant text. |
 | `session-summary` | Per-session synthesized summary: title, directory, first and last user prompt. |
 | `tool-input-summary` | Compact summary of each tool invocation's inputs (command, paths, query, ids). |
 | `tool-error` | Normalized error text from failed tool calls. |
-| `code-touch` | File paths touched by file tools and patches. |
+| `code-touch` | File paths from file-tool inputs (`filePath`, `path`, `paths`, `files`). |
 | `tool-output` | Raw output bodies produced by tool calls. |
-| `patch-summary` | Files changed per patch, with hash and file count. |
 | `reasoning` | Assistant reasoning text. |
-| `file` | File-reference parts (filename, URL, source path). |
 | `raw` | The full-fidelity per-session export, including every searchable body. Selected by the `forensics` surface. |
+
+Channel documents are derived per part, where a part is one item of
+`session_message.data.content[]` (or the `#0` text part of a user message) and is
+identified as `<messageId>#<index>`. The V2 adapter enumerates only `text`,
+`reasoning`, and `tool` parts (plus compaction markers, which are not searchable)
+for imported and V2-live data alike, so these are the only channels that exist.
+Export trees written by older releases may still contain `by-channel/patch-summary`
+or `by-channel/file`; nothing writes them anymore, and a full reconcile (the
+unbudgeted `bulk-export` run or the plugin's background reconcile) prunes them.
 
 ## Grep Defaults
 
@@ -68,7 +75,8 @@ output and reasoning — set `surface:'forensics'` or pass `channels:['raw']`.
 If the curated channel export is only partial (not yet backfilled), both tools fall
 back to the raw `by-session` export to avoid false negatives and add a warning;
 running `opencode-sessions-explorer-bulk-export --reset` backfills the curated
-channels. See [export-and-maintenance.md](../guides/export-and-maintenance.md).
+channels. Run the same `--reset` once after upgrading from a 0.1.x/V1-era export
+tree so hits carry `msg_…#N` part ids instead of legacy `prt_` ids. See [export-and-maintenance.md](../guides/export-and-maintenance.md).
 
 ## Examples
 

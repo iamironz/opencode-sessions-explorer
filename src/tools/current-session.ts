@@ -8,16 +8,27 @@
  *
  * The LLM has no native way to know its own session_id; this tool reads it
  * from the OpenCode ToolContext and enriches with DB state.
+ *
+ * V2 ToolContext carries sessionID/messageID/agent (+ abort signal) but NO
+ * directory/worktree — the plugin entry captures the location directory at
+ * setup time (`lib/tool-v2.ts` getHostDirectory()); worktree is reported as
+ * an empty string.
  */
-import { tool } from "@opencode-ai/plugin"
 import { stmt, locateDb } from "../lib/db.js"
 import { runWithEnvelope } from "../lib/envelope.js"
 import { decodeModel } from "../lib/decode.js"
 import { exportRoot } from "../lib/export.js"
 import { existsSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { getHostDirectory, type HostToolContext } from "../lib/tool-v2.js"
+import { defineTool } from "../lib/tool-v2.js"
+import { canonicalToolNameSql } from "../lib/tool-aliases.js"
 
-export const currentSession = tool({
+export const currentSession = defineTool<{
+  detail: "compact" | "full"
+  include_suggestions: boolean
+} & Record<string, unknown>>({
+  name: "opencode-sessions-explorer-current-session",
   description:
     "opencode-sessions-explorer: identify the CURRENT OpenCode session you (the assistant) are running in — return this session's id, message id, agent, model, directory, parent_id, cost-so-far, message/part/tool-call counters, immediate child sessions, and useful filesystem paths (opencode.db, the opencode-sessions-explorer tree, this session's export subdirectory and meta.json). " +
     "Answers: \"what session am I in\", \"what's my current session id\", \"tell me about this session\", \"who am I (which agent/model)\", \"where am I (directory/worktree)\", \"my session context\", \"this session's metadata\", \"first-call orientation\", \"self-introspection\", \"what's the OpenCode db path\", \"where is the export tree\", \"what's my session id so I can pass it to other opencode-sessions-explorer-* tools\". " +
@@ -25,16 +36,21 @@ export const currentSession = tool({
     "Default detail is compact to avoid noise. Pass detail:'full' for counters, child sessions, paths, and suggestions. " +
     "Takes no args. Cap 8 KB.",
   args: {
-    detail: tool.schema.enum(["compact", "full"]).default("compact").describe("compact returns orientation only; full includes counters, children, paths, and suggestions"),
-    include_suggestions: tool.schema.boolean().default(false).describe("Include suggested follow-up tool calls"),
+    type: "object",
+    properties: {
+      detail: { type: "string", enum: ["compact", "full"], default: "compact", description: "compact returns orientation only; full includes counters, children, paths, and suggestions" },
+      include_suggestions: { type: "boolean", default: false, description: "Include suggested follow-up tool calls" },
+    },
+    required: [],
   },
-  async execute(_args, ctx) {
+  async execute(args, ctx) {
     return runWithEnvelope("current_session", 8, async () => {
-      const sessionId: string = (ctx as any)?.sessionID ?? ""
-      const messageId: string = (ctx as any)?.messageID ?? ""
-      const agent: string = (ctx as any)?.agent ?? ""
-      const directory: string = (ctx as any)?.directory ?? ""
-      const worktree: string = (ctx as any)?.worktree ?? ""
+      const c = (ctx ?? {}) as HostToolContext
+      const sessionId: string = String(c.sessionID ?? "")
+      const messageId: string = String(c.messageID ?? "")
+      const agent: string = String(c.agent ?? "")
+      const directory: string = getHostDirectory()
+      const worktree: string = ""
 
       const root = exportRoot()
       const sessionDir = sessionId ? join(root, "by-session", sessionId) : null
@@ -48,7 +64,7 @@ export const currentSession = tool({
           SELECT id, project_id, parent_id, slug, directory, title, agent, model, cost,
                  tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write,
                  time_created, time_updated, time_archived, share_url, workspace_id, version
-            FROM session WHERE id = ?`).get(sessionId) as any
+            FROM session_v2 WHERE id = ?`).get(sessionId) as any
       }
 
       // Build response
@@ -81,7 +97,7 @@ export const currentSession = tool({
           }
         : null
 
-      const suggestions = sessionId && (_args.detail === "full" || _args.include_suggestions)
+      const suggestions = sessionId && (args.detail === "full" || args.include_suggestions)
         ? [
             { use: "opencode-sessions-explorer-session-timeline", purpose: "walk this session chronologically", args: { session_id: sessionId } },
             { use: "opencode-sessions-explorer-session-summary", purpose: "summarize what happened in this session", args: { session_id: sessionId } },
@@ -101,18 +117,32 @@ export const currentSession = tool({
         },
         session,
       }
-      if (_args.detail !== "full") return { ...compact, suggestions }
+      if (args.detail !== "full") return { ...compact, suggestions }
 
       // Full detail only: counters and relationship lookups can be expensive on huge sessions.
-      const msgCount = sessionId ? Number((stmt(`SELECT COUNT(*) AS n FROM message WHERE session_id = ?`).get(sessionId) as any)?.n ?? 0) : 0
-      const partCount = sessionId ? Number((stmt(`SELECT COUNT(*) AS n FROM part WHERE session_id = ?`).get(sessionId) as any)?.n ?? 0) : 0
+      const msgCount = sessionId ? Number((stmt(`SELECT COUNT(*) AS n FROM session_message WHERE session_id = ?`).get(sessionId) as any)?.n ?? 0) : 0
+      const partCountRow = sessionId
+        ? (stmt(`
+            SELECT (SELECT COUNT(*) FROM session_message sm, json_each(sm.data,'$.content') je
+                     WHERE sm.session_id = ? AND sm.type = 'assistant'
+                       AND json_extract(je.value,'$.type') IN ('text','reasoning','tool')) AS content_parts,
+                   (SELECT COUNT(*) FROM session_message
+                     WHERE session_id = ? AND type IN ('user','system','synthetic')
+                       AND trim(COALESCE(json_extract(data,'$.text'),'')) != '') AS text_msgs,
+                   (SELECT COUNT(*) FROM session_message
+                     WHERE session_id = ? AND type = 'compaction') AS compactions
+          `).get(sessionId, sessionId, sessionId) as any)
+        : null
+      const partCount = partCountRow ? Number(partCountRow.content_parts) + Number(partCountRow.text_msgs) + Number(partCountRow.compactions) : 0
+      // Per-tool counters keyed by the canonical V2 name (bash→shell, task→subagent).
       const toolStats = sessionId
         ? (stmt(`
-            SELECT json_extract(data,'$.tool') AS tool,
-                   json_extract(data,'$.state.status') AS status,
+            SELECT ${canonicalToolNameSql("json_extract(je.value,'$.name')")} AS tool,
+                   json_extract(je.value,'$.state.status') AS status,
                    COUNT(*) AS n
-              FROM part
-             WHERE session_id = ? AND json_extract(data,'$.type') = 'tool'
+              FROM session_message sm, json_each(sm.data,'$.content') je
+             WHERE sm.session_id = ? AND sm.type = 'assistant'
+               AND json_extract(je.value,'$.type') = 'tool'
           GROUP BY tool, status
           ORDER BY n DESC`).all(sessionId) as any[])
         : []
@@ -125,11 +155,11 @@ export const currentSession = tool({
         if (s in entry) (entry as any)[s] += Number(r.n)
       }
       const children = sessionId
-        ? (stmt(`SELECT id, title, agent, time_created FROM session WHERE parent_id = ? ORDER BY time_created DESC LIMIT 20`).all(sessionId) as any[])
+        ? (stmt(`SELECT id, title, agent, time_created FROM session_v2 WHERE parent_id = ? ORDER BY time_created DESC LIMIT 20`).all(sessionId) as any[])
         : []
       let parent: any = null
       if (sessionRow?.parent_id) {
-        parent = stmt(`SELECT id, title, agent FROM session WHERE id = ?`).get(sessionRow.parent_id) as any
+        parent = stmt(`SELECT id, title, agent FROM session_v2 WHERE id = ?`).get(sessionRow.parent_id) as any
       }
 
       return {

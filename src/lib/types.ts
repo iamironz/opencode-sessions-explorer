@@ -1,33 +1,25 @@
 /**
- * Shared types + zod schemas used across opencode-sessions-explorer tools.
+ * Shared types used across opencode-sessions-explorer tools.
  *
- * `z` is imported via the @opencode-ai/plugin tool re-export so we stay
- * on the same zod version the host uses for tool args validation.
+ * OpenCode V2 plugin tools declare args as plain JSON Schema
+ * (`lib/jsonschema.ts` + `lib/tool-v2.ts`); no zod is used anymore.
  */
-import { tool } from "@opencode-ai/plugin"
 import type { StructuredError } from "./errors.js"
 
-export const z = tool.schema
-
-/** All part.data.$.type values observed in the live DB. */
+/**
+ * Every part type the V2 adapter (`lib/v2-parts.ts` messageToParts) produces —
+ * for imported and V2-live data alike.
+ */
 export type PartType =
   | "text"
   | "tool"
   | "reasoning"
-  | "file"
-  | "patch"
-  | "step-start"
-  | "step-finish"
   | "compaction"
-  | "subtask"
 
 export const PART_TYPES_SEARCHABLE: PartType[] = [
   "text",
   "reasoning",
   "tool",
-  "file",
-  "patch",
-  "subtask",
 ]
 
 /** Raw session row as projected from the DB (defensive — most columns optional). */

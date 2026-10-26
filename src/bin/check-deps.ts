@@ -28,11 +28,11 @@ if (dbPath) {
   try {
     const s = getSchemaState()
     if (s.hard_drift.length > 0) {
-      fail("Schema", `hard drift: ${s.hard_drift.join("; ")}`, "Upgrade @opencode-ai/plugin or downgrade your OpenCode install to a compatible schema version.")
+      fail("Schema", `hard drift: ${s.hard_drift.join("; ")}`, "Upgrade OpenCode to a V2-compatible build or downgrade your OpenCode install to a compatible schema version.")
     } else if (s.drift_warnings.length > 0) {
       warn("Schema", `migration ${s.migrations_head} (soft warnings: ${s.drift_warnings.join("; ")})`)
     } else {
-      pass("Schema", `migration ${s.migrations_head}; session=${s.table_counts.session} message=${s.table_counts.message} part=${s.table_counts.part}`)
+      pass("Schema", `migration ${s.migrations_head}; session_v2=${s.table_counts["session_v2"]} session_message=${s.table_counts["session_message"]}`)
     }
     if (s.json1_ok) pass("SQLite json1", "available")
     else fail("SQLite json1", "extension missing", "bun:sqlite ships json1 by default; this should never happen.")

@@ -32,7 +32,7 @@ surface/channel model.
 
 | Tool | Use It For | Key Args |
 | --- | --- | --- |
-| `search-text` | Cross-session regex content search across all bodies (prompts, responses, tool I/O, reasoning, patches) | `q`, `surface`, `channels`, `group_by_session`, `role`, `session_ids`, `project_id`, `agent`, `since_ms`/`until_ms`, `archived`, `limit`, `redact` |
+| `search-text` | Cross-session regex content search across all bodies (prompts, responses, tool I/O, reasoning) | `q`, `surface`, `channels`, `group_by_session`, `role`, `session_ids`, `project_id`, `agent`, `since_ms`/`until_ms`, `archived`, `limit`, `redact` |
 | `grep-session` | Fast regex search inside one known session | `session_id`, `pattern`, `surface`, `channels`, `fixed_string`, `case_sensitive`, `whole_word`, `context_lines`, `limit`, `redact` |
 | `search-tool-calls` | Find tool invocations by name, status, or input/output/error substring | `tool` (exact or `LIKE` wildcard), `status`, `input_like`, `output_like`, `error_like`, `session_id`, `project_id`, `since_ms`/`until_ms`, `archived`, `limit`, `cursor` |
 
@@ -52,7 +52,7 @@ surface/channel model.
    { "q": "retry backoff", "project_id": "global", "since_ms": 1717200000000 }
    ```
 
-1. For exhaustive raw replay over tool output, reasoning, and patches, switch the
+1. For exhaustive raw replay over tool output and reasoning, switch the
    surface:
 
    ```json
@@ -75,6 +75,13 @@ surface/channel model.
    ```json
    { "tool": "mcp-atlassian_jira_%", "limit": 20 }
    ```
+
+   Exact tool names match across the V1→V2 rename (`bash`/`shell`,
+   `task`/`subagent`), so `{ "tool": "bash" }` also returns post-migration
+   `shell` calls; `LIKE` patterns match the raw recorded name only. MCP calls made
+   after the V2 migration run inside Code Mode and are recorded as `execute`, so
+   MCP-name wildcards only find V1-era history. See
+   [Tool-Name Aliases](../reference/tools.md#tool-name-aliases).
 
 ## Related Docs
 

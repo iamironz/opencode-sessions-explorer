@@ -24,7 +24,9 @@ pair-execution chains.
   short line per part) without raw bodies.
 - **Drill into detail.** `get-message` fetches one turn and its parts (bodies
   capped); `get-part` fetches a single part and can dereference externalized
-  tool-output files.
+  tool-output files. Parts are stored inline in the V2 `session_message` row, so a
+  part id is the message id plus the content index: `<messageId>#<index>` (user
+  prompt text is `#0`). Timeline rows and search hits return ids in this form.
 - **Trace relationships.** `session-genealogy` walks the `parent_id` chain up to
   ancestors and down to descendants — the graph that subagent dispatches create.
 
@@ -39,7 +41,7 @@ pair-execution chains.
 | `session-summary` | "Summarize `ses_X`", "what files did I touch", "what tools did I use" | `session_id`, `max_prompt_bytes` |
 | `session-timeline` | "Walk `ses_X` step by step", "show only the tool calls in order" | `session_id`, `types`, `granularity`, `from_ts`/`until_ts`, `limit`, `cursor` |
 | `get-message` | "Fetch message `msg_X` with its parts" | `message_id`, `include_part_data`, `part_types`, `max_part_bytes` |
-| `get-part` | "Show part `prt_X`", "dereference the externalized output of `prt_Z`" | `part_id`, `max_bytes`, `dereference_output_path` |
+| `get-part` | "Show part `msg_X#0`", "dereference the externalized output of `msg_Z#3`" | `part_id` (`<messageId>#<index>`), `max_bytes`, `dereference_output_path` |
 | `session-genealogy` | "Parent chain of `ses_X`", "what subagents did `ses_Y` spawn" | `session_id`, `direction` (`ancestors`/`descendants`/`both`), `max_depth`, `include_archived` |
 
 ## Recommended Flow
@@ -66,14 +68,14 @@ pair-execution chains.
 1. Reconstruct the flow with `session-timeline`, filtering `types` to keep it tight.
 
    ```json
-   { "session_id": "ses_XYZ", "types": ["tool", "patch"], "limit": 100 }
+   { "session_id": "ses_XYZ", "types": ["tool", "text"], "limit": 100 }
    ```
 
 1. Expand a specific event with `get-message` (whole turn) or `get-part` (one part).
    For tool output that was externalized to a file, set `dereference_output_path`:
 
    ```json
-   { "part_id": "prt_ABC", "dereference_output_path": true }
+   { "part_id": "msg_ABC#2", "dereference_output_path": true }
    ```
 
 1. Trace dispatch chains with `session-genealogy` when a session spawned subagents.

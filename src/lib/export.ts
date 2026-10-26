@@ -9,6 +9,7 @@ import { SEARCHABLE_TYPES } from "./export-constants.js"
 import { acquireExportLock } from "./export-lock.js"
 import { reconcileTombstones, type TombstoneProgress } from "./export-tombstones.js"
 import { scheduleBackgroundReconcile } from "./export-background.js"
+import { messageToParts, type V2MessageRow } from "./v2-parts.js"
 import {
   getLastSync as readLastSync,
   getSyncState as readSyncState,
@@ -25,7 +26,7 @@ export type { ExportCursor, SyncState } from "./export-state.js"
 
 export const DEFAULT_EXPORT_ROOT = join(homedir(), ".local/share/opencode-sessions-explorer")
 const BODY_CAP_BYTES = 256 * 1024
-const SAFETY_PART_CAP_BYTES = 50 * 1024 * 1024 // skip parts larger than 50 MB raw
+const SAFETY_MESSAGE_CAP_BYTES = 50 * 1024 * 1024 // skip messages larger than 50 MB raw
 const CHANNEL_COMPLETE_MARKER = ".channels_v1_complete"
 const INSERT_REWIND_MS = 3 * 60 * 1000
 const INSERT_REWIND_MAX_ROWS = 512
@@ -91,13 +92,13 @@ function getSession(id: string): SessionInfo | null {
   const row = stmt(`
     SELECT id, title, project_id, directory, agent, model, cost,
            time_created, time_updated, time_archived, parent_id
-      FROM session WHERE id = ?`).get(id) as any
+      FROM session_v2 WHERE id = ?`).get(id) as any
   if (!row) return null
   sessionCache.set(id, row)
   return row
 }
 
-/** Build the structured-header + body string for one part. */
+/** Build the structured-header + body string for one part (canonical V1-shaped JSON). */
 export function buildPartFile(
   partId: string,
   sessionId: string,
@@ -135,20 +136,6 @@ export function buildPartFile(
       body = parts.join("\n")
       break
     }
-    case "file":
-      lines.push(`MIME: ${decoded.mime ?? "?"}`)
-      body = `FILENAME: ${decoded.filename ?? "?"}\nURL: ${decoded.url ?? "?"}\nSOURCE_PATH: ${decoded.sourcePath ?? "?"}`
-      break
-    case "patch":
-      lines.push(`HASH: ${decoded.hash ?? "?"}`)
-      lines.push(`FILES_COUNT: ${decoded.files.length}`)
-      body = "FILES:\n" + decoded.files.join("\n")
-      break
-    case "subtask":
-      lines.push(`AGENT: ${decoded.agent ?? "?"}`)
-      if (decoded.description) body += `DESCRIPTION: ${decoded.description}\n`
-      body += `PROMPT:\n${decoded.prompt}`
-      break
     default:
       return null
   }
@@ -170,7 +157,7 @@ export function buildPartFile(
 
 export type ChannelDocument = { channel: SearchChannel; content: string }
 
-/** Build derived channel documents for one raw part. */
+/** Build derived channel documents for one raw part (canonical V1-shaped JSON). */
 export function buildChannelDocuments(
   partId: string,
   sessionId: string,
@@ -204,9 +191,6 @@ export function buildChannelDocuments(
     case "reasoning":
       emit("reasoning", decoded.text)
       break
-    case "subtask":
-      emit("conversation", `${decoded.description ? `DESCRIPTION: ${decoded.description}\n` : ""}PROMPT:\n${decoded.prompt}`, [`AGENT: ${decoded.agent ?? "?"}`])
-      break
     case "tool": {
       const extra = [`TOOL: ${decoded.tool}`, `STATUS: ${decoded.status}`]
       const inputSummary = summarizeToolInput(decoded.tool, decoded.input, sessionDirectory)
@@ -217,15 +201,6 @@ export function buildChannelDocuments(
       if (codeTouch) emit("code-touch", codeTouch, extra)
       break
     }
-    case "patch": {
-      const body = decoded.files.map((f) => compactPath(f, sessionDirectory).rel_path ?? f).join("\n")
-      emit("patch-summary", body, [`HASH: ${decoded.hash ?? "?"}`, `FILES_COUNT: ${decoded.files.length}`])
-      emit("code-touch", body, [`SOURCE: patch`, `FILES_COUNT: ${decoded.files.length}`])
-      break
-    }
-    case "file":
-      emit("file", `FILENAME: ${decoded.filename ?? "?"}\nURL: ${decoded.url ?? "?"}\nSOURCE_PATH: ${decoded.sourcePath ?? "?"}`)
-      break
   }
   return docs
 }
@@ -275,8 +250,12 @@ function stringifySafe(value: unknown): string {
   try { return JSON.stringify(value) } catch { return "<unserializable>" }
 }
 
+/**
+ * V4 part filenames: `<seq5>-<msgId>#<idx>.txt` — '#' is preserved (message
+ * ids never contain it) so the part id round-trips through the filename.
+ */
 function safePartFilename(seq: number, partId: string): string {
-  const safe = partId.replace(/[^A-Za-z0-9_-]/g, "_")
+  const safe = partId.replace(/[^A-Za-z0-9_#-]/g, "_")
   return `${String(seq).padStart(5, "0")}-${safe}.txt`
 }
 
@@ -303,7 +282,7 @@ function writeMeta(s: SessionInfo, dir: string): void {
 
 /** Write one part file atomically. Also defensively cleans up any older
  *  seq-variant of the same part_id that may have been left behind by an
- *  earlier writer (defense-in-depth against the v2-migration duplicate bug). */
+ *  earlier writer (defense-in-depth against duplicate seq assignment). */
 function writePartFile(dir: string, filename: string, content: string): void {
   const p = join(dir, filename)
   const tmp = join(dir, "." + filename + ".tmp")
@@ -311,13 +290,13 @@ function writePartFile(dir: string, filename: string, content: string): void {
   renameSync(tmp, p)
 
   // Best-effort cleanup of any same-part_id sibling with a different seq prefix.
-  const m = /^(\d{5})-(prt_[A-Za-z0-9_-]+)\.txt$/.exec(filename)
+  const m = /^(\d{5})-(msg_[A-Za-z0-9_-]+#\d+)\.txt$/.exec(filename)
   if (!m) return
   const myPartId = m[2]
   try {
     for (const f of readdirSync(dir)) {
       if (f === filename || !f.endsWith(".txt") || f.startsWith(".")) continue
-      const fm = /^(\d{5})-(prt_[A-Za-z0-9_-]+)\.txt$/.exec(f)
+      const fm = /^(\d{5})-(msg_[A-Za-z0-9_-]+#\d+)\.txt$/.exec(f)
       if (fm && fm[2] === myPartId) {
         try { unlinkSync(join(dir, f)) } catch { /* ignore */ }
       }
@@ -385,19 +364,13 @@ function buildSessionSummaryDocument(s: SessionInfo): string {
 }
 
 function firstUserPrompt(sessionId: string, direction: "ASC" | "DESC"): string | null {
-  const msg = stmt(`
-    SELECT id
-      FROM message
-     WHERE session_id = ? AND json_extract(data,'$.role') = 'user'
-  ORDER BY time_created ${direction}, id ${direction}
-     LIMIT 1`).get(sessionId) as { id: string } | null
-  if (!msg) return null
-  const rows = stmt(`
+  const row = stmt(`
     SELECT json_extract(data,'$.text') AS text
-      FROM part
-     WHERE message_id = ? AND json_extract(data,'$.type') = 'text'
-  ORDER BY time_created ASC, id ASC`).all(msg.id) as { text: string | null }[]
-  const joined = rows.map((r) => r.text ?? "").join("\n").trim()
+      FROM session_message
+     WHERE session_id = ? AND type = 'user'
+  ORDER BY seq ${direction}, id ${direction}
+     LIMIT 1`).get(sessionId) as { text: string | null } | null
+  const joined = (row?.text ?? "").trim()
   if (!joined) return null
   return capBody(joined, "summary")
 }
@@ -407,10 +380,10 @@ export type ExportProgress = {
   exported: number              // total parts written (inserts + updates)
   inserts: number               // new part files
   updates: number               // re-exported (mutated) part files
-  skipped_nontext: number       // step-start / step-finish / compaction
-  skipped_oversize: number      // > 50 MB safety cap
+  skipped_nontext: number       // messages/parts with no searchable content
+  skipped_oversize: number      // messages > 50 MB safety cap
   failed: number                // decode / write errors
-  retried: number                // failed part ids retried from v3 state
+  retried: number                // failed part ids retried from v4 state
   dead_lettered: number          // failed ids moved out of the hot retry set
   tombstones_removed_parts: number
   tombstones_removed_sessions: number
@@ -434,13 +407,13 @@ function getFileIndex(sessionId: string, dir: string): SessionFileIndex {
     const files = readdirSync(dir).filter((f) => f.endsWith(".txt") && !f.startsWith("."))
     let max = 0
     for (const f of files) {
-      const m = /^(\d{5})-(prt_[A-Za-z0-9_-]+)\.txt$/.exec(f)
+      const m = /^(\d{5})-(msg_[A-Za-z0-9_-]+#\d+)\.txt$/.exec(f)
       if (m) {
         const seq = Number(m[1])
         const partId = m[2]
         idx.byPartId.set(partId, f)
         if (seq > max) max = seq
-      } else if (/^prt_[A-Za-z0-9_-]+\.txt$/.test(f)) {
+      } else if (/^msg_[A-Za-z0-9_-]+#\d+\.txt$/.test(f)) {
         idx.byPartId.set(f.replace(/\.txt$/, ""), f)
       }
     }
@@ -450,22 +423,14 @@ function getFileIndex(sessionId: string, dir: string): SessionFileIndex {
   return idx
 }
 
-type PartExportRow = {
-  id: string
-  session_id: string
-  message_id: string
-  time_created: number
-  time_updated: number
-  data: string
-  data_bytes: number
-  role: string | null
-}
+type MessageExportRow = V2MessageRow & { data_bytes: number }
 
 type DirtySessionRow = { id: string; time_updated: number }
 
 /**
- * Run export sync. Budgeted calls use id-keyset insert detection plus small
- * session-dirty scans; unbudgeted calls also reconcile tombstones.
+ * Run export sync over the V2 tables. Budgeted calls use message-id-keyset
+ * insert detection plus small session-dirty scans; unbudgeted calls also
+ * reconcile tombstones.
  */
 export async function runExport(opts: {
   root?: string
@@ -501,7 +466,7 @@ export async function runExport(opts: {
       applyTombstoneProgress(progress, tombstones)
       state.last_reconcile_at = Date.now()
       state.reconcile_watermark = {
-        part_id: state.insert_cursor.id || null,
+        message_id: state.insert_cursor.id || null,
         session_id: state.session_cursor?.id ?? null,
         at: state.last_reconcile_at,
       }
@@ -559,12 +524,14 @@ function retryFailedParts(
   for (const id of ids) {
     if (timeExceeded(start, budgetMs)) break
     progress.retried++
-    const row = loadPartById(id)
+    // Failed ids are part ids (<msgId>#<idx>) — re-export the whole message.
+    const msgId = id.includes("#") ? id.slice(0, id.indexOf("#")) : id
+    const row = loadMessageById(msgId)
     if (!row) {
       clearPartFailure(state, id)
       continue
     }
-    exportPartRow(root, state, row, progress, touchedSessions)
+    exportMessageRow(root, state, row, progress, touchedSessions)
     reportProgress(progress, onProgress, heartbeat)
   }
 }
@@ -580,15 +547,15 @@ function runInsertFastPath(
   onProgress: ((p: ExportProgress) => void) | undefined,
   heartbeat: () => void,
 ): void {
-  const recentSafeRows: PartExportRow[] = []
+  const recentSafeRows: MessageExportRow[] = []
   let scanCursor = state.insert_cursor.id
   while (!timeExceeded(start, budgetMs)) {
-    const rows = loadPartRowsAfterId(scanCursor, batchSize)
+    const rows = loadMessageRowsAfterId(scanCursor, batchSize)
     if (rows.length === 0) break
     for (const row of rows) {
       if (timeExceeded(start, budgetMs)) break
       scanCursor = row.id
-      const safe = exportPartRow(root, state, row, progress, touchedSessions)
+      const safe = exportMessageRow(root, state, row, progress, touchedSessions)
       if (safe) rememberSafeRow(recentSafeRows, row)
       reportProgress(progress, onProgress, heartbeat)
     }
@@ -613,15 +580,15 @@ function runSessionDirtyFastPath(
   scanDirtySessionHints(state, start, budgetMs, Math.min(batchSize, 500))
   for (const [sessionId, hint] of sortedDirtyHints(state.session_dirty_hints)) {
     while (!timeExceeded(start, budgetMs)) {
-      const rows = loadSessionPartRows(sessionId, hint.part_cursor, batchSize)
+      const rows = loadSessionMessageRows(sessionId, hint.message_cursor, batchSize)
       if (rows.length === 0) {
         delete state.session_dirty_hints[sessionId]
         break
       }
       for (const row of rows) {
         if (timeExceeded(start, budgetMs)) break
-        hint.part_cursor = row.id
-        exportPartRow(root, state, row, progress, touchedSessions)
+        hint.message_cursor = row.id
+        exportMessageRow(root, state, row, progress, touchedSessions)
         reportProgress(progress, onProgress, heartbeat)
       }
       if (rows.length < batchSize) {
@@ -638,22 +605,26 @@ function scanDirtySessionHints(state: SyncState, start: number, budgetMs: number
     const rows = loadDirtySessionsAfter(state.session_cursor, limit)
     if (rows.length === 0) break
     for (const row of rows) {
-      state.session_dirty_hints[row.id] = { time_updated: row.time_updated, part_cursor: null }
+      state.session_dirty_hints[row.id] = { time_updated: row.time_updated, message_cursor: null }
       state.session_cursor = { ts: row.time_updated, id: row.id }
     }
     if (rows.length < limit) break
   }
 }
 
-function exportPartRow(
+/**
+ * Export every enumerable part of one V2 message. Returns true when the
+ * message was processed safely (oversize skip counts as safe).
+ */
+function exportMessageRow(
   root: string,
   state: SyncState,
-  row: PartExportRow,
+  row: MessageExportRow,
   progress: ExportProgress,
   touchedSessions: Set<string>,
 ): boolean {
-  if (row.data_bytes > SAFETY_PART_CAP_BYTES) {
-    removeExistingPartExport(root, row.session_id, row.id)
+  if (row.data_bytes > SAFETY_MESSAGE_CAP_BYTES) {
+    for (const part of messageToParts(row)) removeExistingPartExport(root, row.session_id, part.partId)
     progress.skipped_oversize++
     markSafeCursor(state, progress, row)
     clearPartFailure(state, row.id)
@@ -664,32 +635,42 @@ function exportPartRow(
     const session = getSession(row.session_id)
     if (!session) throw new Error(`missing session ${row.session_id}`)
     const archived = session.time_archived != null
-    const built = buildPartFile(row.id, row.session_id, row.message_id, row.data, archived)
-    if (!built) {
-      removeExistingPartExport(root, row.session_id, row.id)
+    const parts = messageToParts(row)
+    if (parts.length === 0) {
       progress.skipped_nontext++
       markSafeCursor(state, progress, row)
       clearPartFailure(state, row.id)
       return true
     }
-    const channelDocs = buildChannelDocuments(row.id, row.session_id, row.message_id, row.data, archived, row.role, session.directory)
     const dir = join(root, "by-session", row.session_id)
     if (!existsSync(dir)) { mkdirSync(dir, { recursive: true }); writeMeta(session, dir) }
     const idx = getFileIndex(row.session_id, dir)
-    const existing = idx.byPartId.get(row.id)
-    if (existing) {
-      writePartFile(dir, existing, built.content)
-      progress.updates++
-    } else {
-      const filename = safePartFilename(idx.nextSeq++, row.id)
-      writePartFile(dir, filename, built.content)
-      idx.byPartId.set(row.id, filename)
-      progress.inserts++
+    let anyExported = false
+    for (const part of parts) {
+      const built = buildPartFile(part.partId, row.session_id, row.id, part.canonical, archived)
+      if (!built) {
+        removeExistingPartExport(root, row.session_id, part.partId)
+        progress.skipped_nontext++
+        continue
+      }
+      const channelDocs = buildChannelDocuments(part.partId, row.session_id, row.id, part.canonical, archived, row.type, session.directory)
+      const existing = idx.byPartId.get(part.partId)
+      if (existing) {
+        writePartFile(dir, existing, built.content)
+        progress.updates++
+      } else {
+        const filename = safePartFilename(idx.nextSeq++, part.partId)
+        writePartFile(dir, filename, built.content)
+        idx.byPartId.set(part.partId, filename)
+        progress.inserts++
+      }
+      const filename = idx.byPartId.get(part.partId)
+      if (filename) writeChannelFiles(root, row.session_id, filename, part.partId, channelDocs)
+      progress.exported++
+      anyExported = true
     }
-    const filename = idx.byPartId.get(row.id)
-    if (filename) writeChannelFiles(root, row.session_id, filename, row.id, channelDocs)
     touchedSessions.add(row.session_id)
-    progress.exported++
+    if (!anyExported) progress.skipped_nontext++
     markSafeCursor(state, progress, row)
     clearPartFailure(state, row.id)
     return true
@@ -713,43 +694,43 @@ function removeExistingPartExport(root: string, sessionId: string, partId: strin
   } catch { /* best effort stale-export cleanup */ }
 }
 
-function markSafeCursor(state: SyncState, progress: ExportProgress, row: PartExportRow): void {
+function markSafeCursor(state: SyncState, progress: ExportProgress, row: MessageExportRow): void {
   const cursor = { ts: row.time_updated, id: row.id }
   state.legacy_cursor = cursor
   progress.last_cursor = cursor
 }
 
-function markPartFailure(state: SyncState, partId: string, message: string, progress: ExportProgress): void {
-  if (state.dead_letters[partId]) return
+function markPartFailure(state: SyncState, messageId: string, message: string, progress: ExportProgress): void {
+  if (state.dead_letters[messageId]) return
   const now = Date.now()
-  const existing = state.failed_parts[partId]
+  const existing = state.failed_parts[messageId]
   const failure: FailedPartState = {
-    id: partId,
+    id: messageId,
     attempts: (existing?.attempts ?? 0) + 1,
     first_failed_at: existing?.first_failed_at ?? now,
     last_failed_at: now,
     last_error: message,
   }
   if (failure.attempts >= MAX_FAILED_ATTEMPTS) {
-    state.dead_letters[partId] = failure
-    delete state.failed_parts[partId]
+    state.dead_letters[messageId] = failure
+    delete state.failed_parts[messageId]
     progress.dead_lettered++
   } else {
-    state.failed_parts[partId] = failure
+    state.failed_parts[messageId] = failure
   }
 }
 
-function clearPartFailure(state: SyncState, partId: string): void {
-  delete state.failed_parts[partId]
+function clearPartFailure(state: SyncState, id: string): void {
+  delete state.failed_parts[id]
 }
 
-function rememberSafeRow(rows: PartExportRow[], row: PartExportRow): void {
+function rememberSafeRow(rows: MessageExportRow[], row: MessageExportRow): void {
   rows.push(row)
   const maxRows = INSERT_REWIND_MAX_ROWS * 4
   if (rows.length > maxRows) rows.splice(0, rows.length - maxRows)
 }
 
-function chooseInsertCursor(previousId: string, rows: PartExportRow[], useRewind: boolean): string {
+function chooseInsertCursor(previousId: string, rows: MessageExportRow[], useRewind: boolean): string {
   const last = rows[rows.length - 1]
   if (!last || !useRewind || rows.length <= INSERT_REWIND_MAX_ROWS) return last?.id ?? previousId
   const maxCreated = rows.reduce((max, row) => Math.max(max, row.time_created), 0)
@@ -769,7 +750,7 @@ function refreshTouchedSessions(root: string, touchedSessions: Set<string>): voi
     const fresh = stmt(`
       SELECT id, title, project_id, directory, agent, model, cost,
              time_created, time_updated, time_archived, parent_id
-        FROM session WHERE id = ?`).get(sid) as SessionInfo | null
+        FROM session_v2 WHERE id = ?`).get(sid) as SessionInfo | null
     if (fresh) {
       writeMeta(fresh, dir)
       writeSessionSummaryChannel(fresh, root)
@@ -782,41 +763,39 @@ function applyTombstoneProgress(progress: ExportProgress, tombstones: TombstoneP
   progress.tombstones_removed_sessions = tombstones.removed_sessions
 }
 
-function loadPartById(partId: string): PartExportRow | null {
-  return stmt(partSelectSql("WHERE p.id = ?")).get(partId) as PartExportRow | null
+function loadMessageById(messageId: string): MessageExportRow | null {
+  return stmt(messageSelectSql("WHERE m.id = ?")).get(messageId) as MessageExportRow | null
 }
 
-function loadPartRowsAfterId(afterId: string, limit: number): PartExportRow[] {
-  if (!afterId) return stmt(`${partSelectSql("")} ORDER BY p.id ASC LIMIT ?`).all(limit) as PartExportRow[]
-  return stmt(`${partSelectSql("WHERE p.id > ?")} ORDER BY p.id ASC LIMIT ?`).all(afterId, limit) as PartExportRow[]
+function loadMessageRowsAfterId(afterId: string, limit: number): MessageExportRow[] {
+  if (!afterId) return stmt(`${messageSelectSql("")} ORDER BY m.id ASC LIMIT ?`).all(limit) as MessageExportRow[]
+  return stmt(`${messageSelectSql("WHERE m.id > ?")} ORDER BY m.id ASC LIMIT ?`).all(afterId, limit) as MessageExportRow[]
 }
 
-function loadSessionPartRows(sessionId: string, afterId: string | null, limit: number): PartExportRow[] {
+function loadSessionMessageRows(sessionId: string, afterId: string | null, limit: number): MessageExportRow[] {
   if (!afterId) {
-    return stmt(`${partSelectSql("WHERE p.session_id = ?")} ORDER BY p.id ASC LIMIT ?`).all(sessionId, limit) as PartExportRow[]
+    return stmt(`${messageSelectSql("WHERE m.session_id = ?")} ORDER BY m.id ASC LIMIT ?`).all(sessionId, limit) as MessageExportRow[]
   }
-  return stmt(`${partSelectSql("WHERE p.session_id = ? AND p.id > ?")} ORDER BY p.id ASC LIMIT ?`).all(sessionId, afterId, limit) as PartExportRow[]
+  return stmt(`${messageSelectSql("WHERE m.session_id = ? AND m.id > ?")} ORDER BY m.id ASC LIMIT ?`).all(sessionId, afterId, limit) as MessageExportRow[]
 }
 
 function loadDirtySessionsAfter(cursor: ExportCursor | null, limit: number): DirtySessionRow[] {
   if (!cursor) {
-    return stmt(`SELECT id, time_updated FROM session ORDER BY time_updated ASC, id ASC LIMIT ?`).all(limit) as DirtySessionRow[]
+    return stmt(`SELECT id, time_updated FROM session_v2 ORDER BY time_updated ASC, id ASC LIMIT ?`).all(limit) as DirtySessionRow[]
   }
   return stmt(`
     SELECT id, time_updated
-      FROM session
+      FROM session_v2
      WHERE (time_updated > ? OR (time_updated = ? AND id > ?))
   ORDER BY time_updated ASC, id ASC
      LIMIT ?`).all(cursor.ts, cursor.ts, cursor.id, limit) as DirtySessionRow[]
 }
 
-function partSelectSql(where: string): string {
+function messageSelectSql(where: string): string {
   return `
-    SELECT p.id, p.session_id, p.message_id, p.time_created, p.time_updated,
-           p.data, LENGTH(p.data) AS data_bytes,
-           json_extract(m.data,'$.role') AS role
-      FROM part p
-      LEFT JOIN message m ON m.id = p.message_id
+    SELECT m.id, m.session_id, m.type, m.seq, m.time_created, m.time_updated,
+           m.data, LENGTH(m.data) AS data_bytes
+      FROM session_message m
       ${where}`
 }
 

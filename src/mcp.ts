@@ -2,12 +2,14 @@
 /**
  * mcp — MCP stdio entry point.
  *
- * Second entry point beside `src/plugin.ts`. The plugin hands `tools` to the
- * OpenCode host; this file serves the same tools over the Model Context Protocol
- * on stdin/stdout so a NON-OpenCode host (any MCP client) can call them.
+ * Second entry point beside `src/plugin.ts`. The plugin hands the tools to the
+ * OpenCode V2 host; this file serves the same tools over the Model Context
+ * Protocol on stdin/stdout so a NON-OpenCode host (any MCP client) can call
+ * them.
  *
  * `src/tools/index.ts` stays the single source of truth — this file only filters,
- * renames, and adapts. It does not define or duplicate any tool.
+ * renames, and adapts. It does not define or duplicate any tool. V2 tool args
+ * are already plain JSON Schema, so they are passed to MCP as-is.
  *
  * Usage (host config):
  *   command: bun
@@ -18,8 +20,6 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
-import type { ToolContext } from "@opencode-ai/plugin"
-import { z } from "zod"
 import { version } from "../package.json"
 import { tools } from "./tools/index.js"
 
@@ -45,39 +45,11 @@ const EXCLUDED_TOOLS = new Set<string>([
   "opencode-sessions-explorer-unarchive-session",
 ])
 
-/**
- * `tool()` from `@opencode-ai/plugin` is a transparent wrapper: each registry
- * value is exactly `{ description, args, execute }`, where `args` is a plain
- * object of zod schemas (not a `ZodObject`).
- */
-type ExposedTool = {
-  description: string
-  args: z.ZodRawShape
-  execute(args: Record<string, unknown>, context: ToolContext): Promise<unknown>
-}
-
-const exposed = new Map<string, ExposedTool>(
+const exposed = new Map(
   Object.entries(tools)
     .filter(([name]) => !EXCLUDED_TOOLS.has(name))
-    .map(([name, def]) => [name.slice(TOOL_PREFIX.length), def as unknown as ExposedTool]),
+    .map(([name, def]) => [name.slice(TOOL_PREFIX.length), def]),
 )
-
-/**
- * Deliberate no-op shim for the OpenCode `ToolContext`. OpenCode injects real
- * session identity, cancellation, and permission plumbing per call; a foreign MCP
- * host has none of that. Every exposed tool reads the DB directly and ignores
- * these fields, so empty identity plus a never-aborted signal is safe.
- */
-const stubContext: ToolContext = {
-  sessionID: "",
-  messageID: "",
-  agent: "",
-  directory: process.cwd(),
-  worktree: process.cwd(),
-  abort: new AbortController().signal,
-  metadata() {},
-  async ask() {},
-}
 
 const server = new Server({ name: SERVER_NAME, version }, { capabilities: { tools: {} } })
 
@@ -85,7 +57,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [...exposed].map(([name, def]) => ({
     name,
     description: def.description,
-    inputSchema: z.toJSONSchema(z.object(def.args), { io: "input" }) as { type: "object" },
+    inputSchema: def.input as { type: "object" },
   })),
 }))
 
@@ -96,14 +68,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return { content: [{ type: "text" as const, text: `Unknown tool: ${name}` }], isError: true }
   }
   try {
-    // Tools return the JSON envelope as a string (`lib/envelope.ts`); guard anyway.
-    const result = await def.execute(args ?? {}, stubContext)
-    const text = typeof result === "string" ? result : JSON.stringify(result)
+    // Tools return the JSON envelope wrapped as `{ content }`; guard anyway.
+    // The stub context mirrors src/lib/tool-v2.ts HostToolContext — foreign MCP
+    // hosts have no OpenCode identity.
+    const result = await def.execute(args ?? {}, stubContext())
+    const text = typeof result === "string" ? result : ((result as any).content ?? JSON.stringify(result))
     return { content: [{ type: "text" as const, text }] }
   } catch (e) {
     // Never let a single failing call tear down the stdio server.
     return { content: [{ type: "text" as const, text: (e as Error).message }], isError: true }
   }
 })
+
+/** Deliberate no-op shim: never-aborted signal, empty identity. */
+function stubContext() {
+  return {
+    sessionID: "",
+    messageID: "",
+    agent: "",
+    id: "",
+    signal: new AbortController().signal,
+    progress: async () => {},
+  } as any
+}
 
 await server.connect(new StdioServerTransport())

@@ -5,7 +5,8 @@ export type ExportCursor = { ts: number; id: string }
 
 export type DirtySessionHint = {
   time_updated: number
-  part_cursor: string | null
+  /** V4: message-id cursor within the dirty session (was a part-id cursor). */
+  message_cursor: string | null
 }
 
 export type FailedPartState = {
@@ -17,13 +18,14 @@ export type FailedPartState = {
 }
 
 export type ReconcileWatermark = {
-  part_id: string | null
+  message_id: string | null
   session_id: string | null
   at: number
 } | null
 
 export type SyncState = {
-  schema: "v3"
+  schema: "v4"
+  /** Message-id keyset cursor over `session_message` (insert detection). */
   insert_cursor: { id: string }
   session_cursor: ExportCursor | null
   session_dirty_hints: Record<string, DirtySessionHint>
@@ -35,7 +37,7 @@ export type SyncState = {
   migrated_from?: string
 }
 
-const CURSOR_SCHEMA = "v3"
+const CURSOR_SCHEMA = "v4"
 const LAST_SYNC_FILE = ".last_sync"
 
 export function freshSyncState(migratedFrom?: string, legacyCursor: ExportCursor | null = null): SyncState {
@@ -95,9 +97,12 @@ export function parseSyncState(rawInput: string): SyncState {
   if (raw.startsWith("{")) {
     return normalizeSyncState(JSON.parse(raw) as unknown)
   }
-  if (raw.startsWith("v2 ")) {
-    return freshSyncState("v2", parseLegacyCursor(raw.slice(3)))
-  }
+  // v1..v3 states were keyed on V1 part ids (`part` table); the V4 engine
+  // enumerates parts from `session_message`, so old cursors are unusable —
+  // migrate to a FRESH state (forces full re-export; tombstone reconcile then
+  // removes the stale prt_-keyed files).
+  if (raw.startsWith("v3 ")) return freshSyncState("v3")
+  if (raw.startsWith("v2 ")) return freshSyncState("v2", parseLegacyCursor(raw.slice(3)))
   const legacy = parseLegacyCursor(raw)
   return freshSyncState(legacy ? "v1" : "unknown", legacy)
 }
@@ -139,13 +144,13 @@ function dirtyHints(value: unknown): Record<string, DirtySessionHint> {
   for (const [id, raw] of Object.entries(value)) {
     if (!id) continue
     if (typeof raw === "number" && Number.isFinite(raw)) {
-      out[id] = { time_updated: raw, part_cursor: null }
+      out[id] = { time_updated: raw, message_cursor: null }
       continue
     }
     if (!isRecord(raw)) continue
     const timeUpdated = finiteOrNull(raw.time_updated)
     if (timeUpdated == null) continue
-    out[id] = { time_updated: timeUpdated, part_cursor: asString(raw.part_cursor) }
+    out[id] = { time_updated: timeUpdated, message_cursor: asString(raw.message_cursor) ?? asString(raw.part_cursor) }
   }
   return out
 }
@@ -155,7 +160,7 @@ function reconcileWatermark(value: unknown): ReconcileWatermark {
   const at = finiteOrNull(value.at)
   if (at == null) return null
   return {
-    part_id: asString(value.part_id),
+    message_id: asString(value.message_id) ?? asString(value.part_id),
     session_id: asString(value.session_id),
     at,
   }

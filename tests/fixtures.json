@@ -1,27 +1,27 @@
 {
   "sessions": {
-    "active": "ses_1a13f77cbffe1Zsrdm4Lp149hA",
-    "archived": "ses_1c5d6463fffestt8Qcu7iYsj75",
-    "deep_parent": "ses_1e8b38197ffeftCR8DSGqi9Ecp",
-    "big_part": "ses_221a7b55affe75ro8obaP5bnC7",
-    "pre_migration": "ses_52057500effeWkbFgvuxtrwF2h",
+    "active": "ses_e976ea22affe1Ar0XOnBLIQTtL",
+    "archived": "ses_0b9b9ea95ffeKbj84A0wBUsF1k",
+    "deep_parent": "ses_eb12ec340ffeQTK2AeuysVF3UN",
+    "big_part": "ses_f941310d5ffeuNFWZzQcQLDCAN",
+    "pre_migration": "ses_12e32ddf6ffeoI8nPPEXPQgbv6",
     "missing": "ses_does_not_exist_xyz"
   },
   "messages": {
-    "active_first_user": "msg_e5ec088390016sqvh9vSTNg37N",
-    "big_message_150mb": "msg_df2dc767b001T2uwKyvPMX54aD",
+    "active_first_user": "msg_168915ddd001FffPu2F43a3yee",
+    "big_message_150mb": "msg_029fcb46b001wC5oyLphCIqCQX",
     "missing": "msg_does_not_exist_xyz"
   },
   "parts": {
-    "text_active": "prt_e5ec0883c002Vl85aEmIR4sBDK",
-    "tool_completed": "prt_e5ec0985c001eE9U21ykYgvKAW",
-    "tool_error": "prt_e5ecc8125001B908bzcCp62Nno",
-    "big_5mb_patch": "prt_df320c316001jU3TGCB0uH2MdV",
-    "tool_with_outputpath": "prt_c4293bfbc001p6GebCGcGYTxtr",
-    "missing": "prt_does_not_exist_xyz"
+    "text_active": "msg_168915ddd001FffPu2F43a3yee#0",
+    "tool_completed": "msg_168b5d1e800194fC1xa8NmNazL#2",
+    "tool_error": "msg_068f7b760001Brc8pZci5ckPuf#2",
+    "big_5mb_patch": "msg_ff799f1f1002bWnfbNKHklC967#0",
+    "tool_with_outputpath": "msg_16538ae77001D2lxvgS1mTQ9yT#1",
+    "missing": "msg_does_not_exist_xyz#0"
   },
   "phrases": {
-    "active_known": "Submit PR review"
+    "active_known": "port opencode-sessions-explorer"
   },
   "expected_counts": {
     "session_min": 2500,

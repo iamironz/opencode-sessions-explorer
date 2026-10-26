@@ -5,32 +5,50 @@
  * model, cost/token thresholds, time window, archived). Complements
  * list_sessions by adding cost/token thresholds. Cap: 96 KB.
  */
-import { tool } from "@opencode-ai/plugin"
 import { stmt } from "../lib/db.js"
 import { runWithEnvelope } from "../lib/envelope.js"
 import { decodeCursor, encodeCursor } from "../lib/pagination.js"
 import { decodeModel } from "../lib/decode.js"
 import { table } from "../lib/table.js"
+import { defineTool } from "../lib/tool-v2.js"
 
-export const searchSessionsMeta = tool({
+export const searchSessionsMeta = defineTool<{
+  title_like?: string
+  directory_like?: string
+  project_id?: string
+  agent?: string
+  model_id?: string
+  min_cost?: number
+  min_tokens_input?: number
+  since_ms?: number
+  until_ms?: number
+  archived: "no" | "only" | "any"
+  limit: number
+  cursor?: string
+}>({
+  name: "opencode-sessions-explorer-search-sessions-meta",
   description:
     "opencode-sessions-explorer: find OpenCode sessions by STRUCTURED METADATA filters (title, directory, project, agent, model, cost, tokens, time). For CONTENT search (body of conversations) use search-text instead. " +
     "Answers: \"find sessions whose title matches X\", \"sessions costing more than $5\", \"sessions where I used Claude Opus this week\", \"sessions in directory Y from last month\", \"sessions with more than 100K input tokens\", \"expensive sessions\", \"most expensive single session\", \"sessions matching multiple criteria at once\". " +
     "Filters (all combinable): title_like (case-insensitive substring on session title), directory_like (LIKE substring), project_id, agent, model_id (substring on session.model JSON), min_cost (USD threshold), min_tokens_input, since_ms / until_ms (window on time_updated), archived ('no'=default, 'only', 'any'). " +
     "Same envelope as list-sessions but with cost/token thresholds added. Cursor pagination. Returns metadata only.",
   args: {
-    title_like: tool.schema.string().optional().describe("Case-insensitive substring on title"),
-    directory_like: tool.schema.string().optional().describe("LIKE substring on directory"),
-    project_id: tool.schema.string().optional(),
-    agent: tool.schema.string().optional(),
-    model_id: tool.schema.string().optional(),
-    min_cost: tool.schema.number().nonnegative().optional().describe("Sessions with cost >= this (USD)"),
-    min_tokens_input: tool.schema.number().int().nonnegative().optional(),
-    since_ms: tool.schema.number().int().nonnegative().optional(),
-    until_ms: tool.schema.number().int().nonnegative().optional(),
-    archived: tool.schema.enum(["no", "only", "any"]).default("no"),
-    limit: tool.schema.number().int().min(1).max(100).default(20),
-    cursor: tool.schema.string().optional(),
+    type: "object",
+    properties: {
+      title_like: { type: "string", description: "Case-insensitive substring on title" },
+      directory_like: { type: "string", description: "LIKE substring on directory" },
+      project_id: { type: "string" },
+      agent: { type: "string" },
+      model_id: { type: "string" },
+      min_cost: { type: "number", minimum: 0, description: "Sessions with cost >= this (USD)" },
+      min_tokens_input: { type: "integer", minimum: 0 },
+      since_ms: { type: "integer", minimum: 0 },
+      until_ms: { type: "integer", minimum: 0 },
+      archived: { type: "string", enum: ["no", "only", "any"], default: "no" },
+      limit: { type: "integer", minimum: 1, maximum: 100, default: 20 },
+      cursor: { type: "string" },
+    },
+    required: [],
   },
   async execute(args) {
     return runWithEnvelope("search_sessions_meta", 96, async (ctx) => {
@@ -57,7 +75,7 @@ export const searchSessionsMeta = tool({
         SELECT s.id, s.project_id, s.parent_id, s.directory, s.title, s.agent, s.model,
                s.cost, s.tokens_input, s.tokens_output, s.tokens_reasoning,
                s.time_created, s.time_updated, s.time_archived
-          FROM session s
+          FROM session_v2 s
           ${whereSql}
       ORDER BY s.time_updated DESC, s.id DESC
          LIMIT ?`

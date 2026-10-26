@@ -1,18 +1,20 @@
 /**
  * unarchive_session — the plugin's only WRITE tool.
  *
- * These tests MUST NOT mutate the real opencode.db. We snapshot the live DB to a
- * throwaway temp copy (copying the -wal/-shm sidecars so the copy opens
- * consistently), point $OPENCODE_SESSIONS_EXPLORER_DB at the copy, exercise the
- * tool against a REAL archived session row, and assert the live DB is untouched.
+ * These tests MUST NOT mutate the real opencode.db. We build a trimmed snapshot
+ * of the live DB (same V2 schema for `session_v2` + `session_message`, only the
+ * rows under test), point $OPENCODE_SESSIONS_EXPLORER_DB at the copy, exercise
+ * the tool against a REAL archived session row, and assert the live DB is
+ * untouched.
  */
 import { test, describe, expect, beforeAll, afterAll } from "bun:test"
 import { Database } from "bun:sqlite"
-import { copyFileSync, existsSync, rmSync, mkdtempSync } from "node:fs"
+import { rmSync, mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { runTool } from "./helpers.ts"
 import { _resetForTest } from "../src/lib/db.ts"
+import { _resetSchemaForTest } from "../src/lib/schema.ts"
 import { unarchiveSession } from "../src/tools/unarchive-session.ts"
 
 const LIVE_DB = process.env.OPENCODE_SESSIONS_EXPLORER_DB ?? `${process.env.HOME}/.local/share/opencode/opencode.db`
@@ -25,23 +27,44 @@ let archivedTs: number
 let activeId: string
 
 beforeAll(() => {
-  // Snapshot the live DB (+ WAL sidecars) into an isolated temp copy.
+  // Build an isolated TRIMMED snapshot of the live DB: same V2 schema, but only
+  // `session_v2` + `session_message` and only the rows under test. (The live
+  // opencode.db is ~17 GB — a full file copy is impractical under disk quota;
+  // the write path under test touches only these two tables anyway. In hermetic
+  // mode the source DB is the tiny synthetic fixture, so the same builder works.)
   tmpDir = mkdtempSync(join(tmpdir(), "opencode-sessions-explorer-unarchive-"))
   copyPath = join(tmpDir, "opencode.db")
-  copyFileSync(LIVE_DB, copyPath)
-  for (const ext of ["-wal", "-shm"]) {
-    if (existsSync(LIVE_DB + ext)) copyFileSync(LIVE_DB + ext, copyPath + ext)
-  }
 
-  // Pick a real archived session + a real active session from the COPY.
-  const snap = new Database(copyPath, { readonly: true })
+  const src = new Database(LIVE_DB, { readonly: true })
+  const snap = new Database(copyPath, { create: true })
   try {
-    snap.exec("PRAGMA busy_timeout=5000")
+    src.exec("PRAGMA busy_timeout=5000")
+    snap.exec("PRAGMA journal_mode = WAL;")
+    snap.exec(`ATTACH DATABASE '${LIVE_DB.replace(/'/g, "''")}' AS src`)
+    for (const tbl of ["session_v2", "session_message"]) {
+      const ddl = src.query(`SELECT sql FROM sqlite_master WHERE type='table' AND name = ?`).get(tbl) as { sql: string } | null
+      if (!ddl?.sql) throw new Error(`missing ${tbl} in snapshot source`)
+      snap.exec(ddl.sql)
+    }
+    // Copy the sessions + a bounded window of their messages (identity only).
+    snap.exec(`
+      INSERT INTO session_v2 SELECT * FROM src.session_v2
+       WHERE time_archived IS NOT NULL
+          OR id IN (SELECT id FROM src.session_v2 WHERE time_archived IS NULL ORDER BY time_updated DESC LIMIT 5)
+    `)
+    snap.exec(`
+      INSERT INTO session_message
+      SELECT m.* FROM src.session_message m
+       WHERE m.session_id IN (SELECT id FROM main.session_v2)
+         AND m.rowid <= (SELECT MIN(rowid) + 50 FROM src.session_message m2 WHERE m2.session_id = m.session_id)
+    `)
+    snap.exec("DETACH DATABASE src")
+
     const arch = snap
-      .query("SELECT id, time_archived FROM session WHERE time_archived IS NOT NULL ORDER BY time_archived DESC LIMIT 1")
+      .query("SELECT id, time_archived FROM session_v2 WHERE time_archived IS NOT NULL ORDER BY time_archived DESC LIMIT 1")
       .get() as { id: string; time_archived: number } | null
     const act = snap
-      .query("SELECT id FROM session WHERE time_archived IS NULL ORDER BY time_updated DESC LIMIT 1")
+      .query("SELECT id FROM session_v2 WHERE time_archived IS NULL ORDER BY time_updated DESC LIMIT 1")
       .get() as { id: string } | null
     if (!arch) throw new Error("no archived session in snapshot — cannot test unarchive")
     if (!act) throw new Error("no active session in snapshot")
@@ -50,19 +73,25 @@ beforeAll(() => {
     activeId = act.id
   } finally {
     snap.close()
+    src.close()
   }
 
-  // Redirect the shared (read) + write paths at the copy.
+  // Redirect the shared (read) + write paths at the copy, and drop the
+  // process-wide schema-state cache so later test files re-probe the snapshot.
   savedEnv = process.env.OPENCODE_SESSIONS_EXPLORER_DB
   process.env.OPENCODE_SESSIONS_EXPLORER_DB = copyPath
   _resetForTest()
+  _resetSchemaForTest()
 })
 
 afterAll(() => {
-  // Restore the real DB path for any later test files + clean up.
+  // Restore the real DB path for any later test files + clean up. Reset both
+  // the DB handle and the cached schema state so subsequent files re-probe
+  // whatever DB their mode selects.
   if (savedEnv === undefined) delete process.env.OPENCODE_SESSIONS_EXPLORER_DB
   else process.env.OPENCODE_SESSIONS_EXPLORER_DB = savedEnv
   _resetForTest()
+  _resetSchemaForTest()
   try {
     rmSync(tmpDir, { recursive: true, force: true })
   } catch {
@@ -75,7 +104,7 @@ function readArchived(dbPath: string, id: string): number | null {
   const d = new Database(dbPath, { readonly: true })
   try {
     d.exec("PRAGMA busy_timeout=5000")
-    const r = d.query("SELECT time_archived FROM session WHERE id = ?").get(id) as { time_archived: number | null } | null
+    const r = d.query("SELECT time_archived FROM session_v2 WHERE id = ?").get(id) as { time_archived: number | null } | null
     return r ? (r.time_archived ?? null) : null
   } finally {
     d.close()
@@ -96,7 +125,7 @@ describe("unarchive_session", () => {
     const w = new Database(copyPath, { readwrite: true, create: false })
     try {
       w.exec("PRAGMA busy_timeout=5000")
-      w.query("UPDATE session SET time_archived = NULL, time_updated = ? WHERE id = ?").run(OLD, activeId)
+      w.query("UPDATE session_v2 SET time_archived = NULL, time_updated = ? WHERE id = ?").run(OLD, activeId)
     } finally {
       w.close()
     }
@@ -148,10 +177,10 @@ describe("unarchive_session", () => {
     try {
       w.exec("PRAGMA busy_timeout=5000")
       const row = w
-        .query("SELECT id FROM session WHERE time_archived IS NULL ORDER BY time_updated DESC LIMIT 1")
+        .query("SELECT id FROM session_v2 WHERE time_archived IS NULL ORDER BY time_updated DESC LIMIT 1")
         .get() as { id: string }
       target = row.id
-      w.query("UPDATE session SET time_archived = ?, time_updated = ? WHERE id = ?").run(Date.now(), OLD, target)
+      w.query("UPDATE session_v2 SET time_archived = ?, time_updated = ? WHERE id = ?").run(Date.now(), OLD, target)
     } finally {
       w.close()
     }
@@ -167,7 +196,7 @@ describe("unarchive_session", () => {
     const updatedAfter = (() => {
       const d = new Database(copyPath, { readonly: true })
       try {
-        return (d.query("SELECT time_updated FROM session WHERE id = ?").get(target) as { time_updated: number }).time_updated
+        return (d.query("SELECT time_updated FROM session_v2 WHERE id = ?").get(target) as { time_updated: number }).time_updated
       } finally {
         d.close()
       }

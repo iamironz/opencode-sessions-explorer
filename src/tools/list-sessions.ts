@@ -4,15 +4,27 @@
  * Page sessions newest-first with structured filters.
  * Cursor: (time_updated, id). Cap: 96 KB.
  */
-import { tool } from "@opencode-ai/plugin"
 import { stmt } from "../lib/db.js"
 import { runWithEnvelope, fail } from "../lib/envelope.js"
 import { decodeCursor, encodeCursor } from "../lib/pagination.js"
 import { decodeModel } from "../lib/decode.js"
 import { table } from "../lib/table.js"
+import { defineTool } from "../lib/tool-v2.js"
 import type { SessionRow } from "../lib/types.js"
 
-export const listSessions = tool({
+export const listSessions = defineTool<{
+  limit: number
+  cursor?: string
+  project_id?: string
+  agent?: string
+  model_id?: string
+  directory_prefix?: string
+  archived: "no" | "only" | "any"
+  since_ms?: number
+  until_ms?: number
+  title_like?: string
+}>({
+  name: "opencode-sessions-explorer-list-sessions",
   description:
     "opencode-sessions-explorer: browse your prior OpenCode chat sessions, newest-first. " +
     "Answers questions like: \"list my recent sessions\", \"show me my sessions from yesterday / last week / this month\", \"what OpenCode sessions did I have today\", \"sessions using agent X\", \"sessions where I used Claude Opus / GPT\", \"sessions in directory Y\", \"all my OpenCode chats in /projects/foo\", \"browse my session history\", \"recent conversations\". " +
@@ -20,16 +32,20 @@ export const listSessions = tool({
     "Filters (combinable): project_id, agent, model_id (matches inside the JSON model column), directory_prefix, archived ('no'=default, 'only', 'any'), since_ms/until_ms (window on time_updated), title_like (case-insensitive substring). " +
     "Cursor pagination via meta.next_cursor — pass it back as `cursor` arg to get the next page.",
   args: {
-    limit: tool.schema.number().int().min(1).max(100).default(20).describe("Max sessions (1-100, default 20)"),
-    cursor: tool.schema.string().optional().describe("Opaque cursor from a previous call's next_cursor"),
-    project_id: tool.schema.string().optional().describe("Exact project_id match (e.g. 'global')"),
-    agent: tool.schema.string().optional().describe("Exact agent name match"),
-    model_id: tool.schema.string().optional().describe("Substring match on the model id inside session.model JSON"),
-    directory_prefix: tool.schema.string().optional().describe("Filter to sessions where directory starts with this string"),
-    archived: tool.schema.enum(["no", "only", "any"]).default("no").describe("'no' (default) excludes archived; 'only' returns only archived; 'any' includes both"),
-    since_ms: tool.schema.number().int().nonnegative().optional().describe("Only sessions with time_updated >= since_ms"),
-    until_ms: tool.schema.number().int().nonnegative().optional().describe("Only sessions with time_updated <= until_ms"),
-    title_like: tool.schema.string().optional().describe("Case-insensitive substring on title"),
+    type: "object",
+    properties: {
+      limit: { type: "integer", minimum: 1, maximum: 100, default: 20, description: "Max sessions (1-100, default 20)" },
+      cursor: { type: "string", description: "Opaque cursor from a previous call's next_cursor" },
+      project_id: { type: "string", description: "Exact project_id match (e.g. 'global')" },
+      agent: { type: "string", description: "Exact agent name match" },
+      model_id: { type: "string", description: "Substring match on the model id inside session.model JSON" },
+      directory_prefix: { type: "string", description: "Filter to sessions where directory starts with this string" },
+      archived: { type: "string", enum: ["no", "only", "any"], default: "no", description: "'no' (default) excludes archived; 'only' returns only archived; 'any' includes both" },
+      since_ms: { type: "integer", minimum: 0, description: "Only sessions with time_updated >= since_ms" },
+      until_ms: { type: "integer", minimum: 0, description: "Only sessions with time_updated <= until_ms" },
+      title_like: { type: "string", description: "Case-insensitive substring on title" },
+    },
+    required: [],
   },
   async execute(args) {
     return runWithEnvelope("list_sessions", 96, async (ctx) => {
@@ -56,7 +72,7 @@ export const listSessions = tool({
         SELECT s.id, s.project_id, s.parent_id, s.directory, s.title, s.agent, s.model,
                s.cost, s.tokens_input, s.tokens_output, s.tokens_reasoning,
                s.time_created, s.time_updated, s.time_archived, s.workspace_id, s.slug
-          FROM session s
+          FROM session_v2 s
           ${whereSql}
        ORDER BY s.time_updated DESC, s.id DESC
           LIMIT ?`

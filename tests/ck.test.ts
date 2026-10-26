@@ -20,11 +20,11 @@ afterEach(() => {
 
 describe("ck regex scan and coverage", () => {
   test("search-text exposes regex search without a mode argument", () => {
-    expect("mode" in searchText.args).toBe(false)
+    expect("mode" in (searchText.input as any).properties).toBe(false)
   })
 
   test("grep-session exposes regex search without a mode argument", () => {
-    expect("mode" in grepSession.args).toBe(false)
+    expect("mode" in (grepSession.input as any).properties).toBe(false)
   })
 
   test("search-text rejects any mode before launching ck when schema parsing is bypassed", async () => {
@@ -171,7 +171,7 @@ describe("ck regex scan and coverage", () => {
   test("search-text returns an explicit warning when scoped export remains missing", async () => {
     await withTempExportRoot(async (root) => withFakeBackgroundWorker(async () => {
       setSyncState({
-        schema: "v3",
+        schema: "v4",
         insert_cursor: { id: "zzzzzz" },
         session_cursor: { ts: Number.MAX_SAFE_INTEGER, id: "zzzzzz" },
         session_dirty_hints: {},
@@ -180,7 +180,7 @@ describe("ck regex scan and coverage", () => {
         dead_letters: {},
         last_reconcile_at: Date.now(),
         legacy_cursor: { ts: Number.MAX_SAFE_INTEGER, id: "zzzzzz" },
-      }, root)
+      } as any, root)
 
       const env = await runTool(searchText, {
         q: "big patch",
@@ -255,7 +255,7 @@ function tempRoot(): string {
 
 async function runToolWithoutSchema(def: any, args: Record<string, unknown>): Promise<any> {
   const result = await def.execute(args, mockCtx())
-  const json = typeof result === "string" ? result : (result.output ?? JSON.stringify(result))
+  const json = typeof result === "string" ? result : (result?.content ?? JSON.stringify(result))
   return JSON.parse(json)
 }
 
@@ -266,11 +266,11 @@ function writeFakeCk(root: string, opts: { sleepSeconds?: string; argsLog?: stri
   writeFileSync(path, `#!/usr/bin/env bash
 args_log=${JSON.stringify(argsLog)}
 if [[ -n "$args_log" ]]; then
-  printf '%s\n' "$*" >> "$args_log"
+  printf '%s\\n' "$*" >> "$args_log"
 fi
 sleep ${sleep}
 scope="\${@: -1}"
-printf '{"path":"%s/00001-prt_fake.txt","span":{"byte_start":0,"byte_end":4,"line_start":1,"line_end":1},"language":"text","snippet":"fake needle","score":1}\n' "$scope"
+printf '{"path":"%s/00001-msg_fake001abc#0.txt","span":{"byte_start":0,"byte_end":4,"line_start":1,"line_end":1},"language":"text","snippet":"fake needle","score":1}\\n' "$scope"
 `)
   chmodSync(path, 0o755)
   return path

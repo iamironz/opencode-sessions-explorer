@@ -1,31 +1,30 @@
 /**
- * Test helpers — mock OpenCode ToolContext + run-and-parse helper.
+ * Test helpers — mock OpenCode V2 tool context + run-and-parse helper.
  *
- * Critically, this helper APPLIES ZOD VALIDATION to the input args so
- * defaults declared with `.default(...)` actually kick in — mirroring
- * what OpenCode does at runtime before calling execute().
+ * Critically, this helper APPLIES THE TOOL'S JSON-SCHEMA DEFAULTS to the input
+ * args — mirroring what the OpenCode host does at runtime before calling
+ * execute() — and unwraps the V2 `{ content }` result into the JSON envelope.
  */
-import { z } from "zod"
 import type { Envelope } from "../src/lib/types.js"
 import { decodeTable, isTable } from "../src/lib/table.js"
+import { withDefaults, type ToolArgsSchema } from "../src/lib/jsonschema.js"
 
 export function mockCtx() {
   return {
     sessionID: "test-session",
     messageID: "test-message",
     agent: "test",
-    directory: "/tmp",
-    worktree: "/tmp",
-    abort: new AbortController().signal,
-    metadata: () => {},
-    ask: async () => {},
+    signal: new AbortController().signal,
+    id: "call_test",
+    progress: async () => {},
   }
 }
 
-/** Call a tool's execute (after applying zod defaults) and parse the JSON envelope.
- *  Accepts EITHER a module (with default export) OR the tool definition directly.
- *  Optional ctxOverride lets a test inject sessionID/messageID/etc — useful for
- *  testing opencode-sessions-explorer-current-session against a real fixture session. */
+/** Call a tool's execute (after applying JSON-Schema defaults) and parse the
+ *  JSON envelope. Accepts EITHER a module (with default export) OR the tool
+ *  definition directly. Optional ctxOverride lets a test inject
+ *  sessionID/messageID/etc — useful for testing
+ *  opencode-sessions-explorer-current-session against a real fixture session. */
 /** Raw runner — returns the on-the-wire envelope WITHOUT decoding columnar tables.
  *  Use this to assert the compact wire format. */
 export async function runToolRaw<T = any>(
@@ -34,11 +33,10 @@ export async function runToolRaw<T = any>(
   ctxOverride: Partial<ReturnType<typeof mockCtx>> = {},
 ): Promise<Envelope<T>> {
   const def = toolModuleOrDef?.default ?? toolModuleOrDef
-  const schema = z.object(def.args)
-  const parsed = schema.parse(args)
+  const parsed = withDefaults(def.args as ToolArgsSchema, args)
   const ctx = { ...mockCtx(), ...ctxOverride }
   const result = await def.execute(parsed, ctx)
-  const json = typeof result === "string" ? result : (result.output ?? JSON.stringify(result))
+  const json = typeof result === "string" ? result : (result?.content ?? JSON.stringify(result))
   return JSON.parse(json) as Envelope<T>
 }
 
@@ -78,8 +76,8 @@ type Fixtures = {
 }
 
 /** In LIVE mode use the author's real-corpus fixtures.json; otherwise use the
- *  synthetic IDs/phrases/counts that tests/fixtures/build-fixture.ts inserted —
- *  one shared source of truth so helpers and the generator never drift. */
+ * synthetic IDs/phrases/counts that tests/fixtures/build-fixture.ts inserted —
+ * one shared source of truth so helpers and the generator never drift. */
 export function loadFixtures(): Fixtures {
   if (process.env.OPENCODE_SESSIONS_EXPLORER_LIVE) return liveFixtures as Fixtures
   return hermeticFixtures as unknown as Fixtures

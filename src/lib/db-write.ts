@@ -5,19 +5,20 @@
  * `PRAGMA query_only=1`). This module deliberately opens a SEPARATE, short-lived
  * read-write handle so the shared read path keeps its read-only guarantee intact.
  *
- * Scope is intentionally tiny: clearing `session.time_archived` (unarchive) and,
- * paired with it, refreshing `session.time_updated`. OpenCode has NO external
+ * Scope is intentionally tiny: clearing `session_v2.time_archived` (unarchive) and,
+ * paired with it, refreshing `session_v2.time_updated`. OpenCode has NO external
  * unarchive path — the HTTP `UpdatePayload` types `time.archived` as a finite
  * number and the handler ignores `undefined`, so `null`/clear can't be sent over
- * the wire (verified against v1.15.12 source). A direct DB write is the only way.
+ * the wire (verified against v1.15.12 source; V2 exposes no clear either).
+ * A direct DB write is the only way.
  *
- * Why we also bump `time_updated`: OpenCode's app/server load the session list
- * ordered by `time_updated DESC` with a default `LIMIT 100` *per directory*. A
- * session archived long ago keeps an old `time_updated`, so merely clearing
- * `time_archived` leaves it buried far below that window — the app never loads it
- * and prompting fails with "Unable to retrieve session". Refreshing
- * `time_updated` resurfaces the restored session at the top, where the app loads
- * it (this is also the intuitive meaning of "restore"). See README → Writes.
+ * Why we also bump `time_updated`: verified against the opencode v2.1.3 binary —
+ * `SessionStore.list` selects `session_v2` ordered by `time_updated DESC, id DESC`
+ * (archived rows filtered via `time_archived IS NULL`), and the archive event
+ * sets BOTH `time_archived` and a fresh `time_updated`. A session archived long
+ * ago keeps an old `time_updated`, so merely clearing `time_archived` leaves it
+ * buried far below the picker's recency window. Refreshing `time_updated`
+ * resurfaces the restored session at the top, where the app loads it.
  *
  * Concurrency: the live OpenCode process may hold the DB open in WAL mode. WAL
  * allows many readers + one writer across processes; `busy_timeout=5000` covers
@@ -75,14 +76,14 @@ export function unarchiveSessionRow(sessionID: string, now: number = Date.now())
   const wdb = openWrite()
   try {
     const row = wdb
-      .query("SELECT time_archived, time_updated FROM session WHERE id = ?")
+      .query("SELECT time_archived, time_updated FROM session_v2 WHERE id = ?")
       .get(sessionID) as { time_archived: number | null; time_updated: number | null } | null
     if (!row) throw new SessionsError("NOT_FOUND", `session not found: ${sessionID}`)
 
     const archivedBefore = row.time_archived ?? null
     const updatedBefore = row.time_updated ?? null
     // Always clear archived + resurface, even if already active (it may be buried).
-    wdb.query("UPDATE session SET time_archived = NULL, time_updated = ? WHERE id = ?").run(now, sessionID)
+    wdb.query("UPDATE session_v2 SET time_archived = NULL, time_updated = ? WHERE id = ?").run(now, sessionID)
     return { wasArchived: archivedBefore !== null, archivedBefore, updatedBefore, updatedAfter: now }
   } catch (e) {
     if (e instanceof SessionsError) throw e
@@ -97,7 +98,7 @@ export function unarchiveSessionRow(sessionID: string, now: number = Date.now())
 }
 
 /**
- * Low-level: set/clear `session.time_archived` only (no `time_updated` change).
+ * Low-level: set/clear `session_v2.time_archived` only (no `time_updated` change).
  * Kept for completeness/symmetry (e.g. archiving); the unarchive tool uses
  * `unarchiveSessionRow` which also resurfaces the session.
  *
@@ -108,12 +109,12 @@ export function setSessionArchived(sessionID: string, time: number | null): { ch
   const wdb = openWrite()
   try {
     const row = wdb
-      .query("SELECT time_archived FROM session WHERE id = ?")
+      .query("SELECT time_archived FROM session_v2 WHERE id = ?")
       .get(sessionID) as { time_archived: number | null } | null
     if (!row) throw new SessionsError("NOT_FOUND", `session not found: ${sessionID}`)
     const before = row.time_archived ?? null
     if (before === time) return { changed: false, before }
-    wdb.query("UPDATE session SET time_archived = ? WHERE id = ?").run(time, sessionID)
+    wdb.query("UPDATE session_v2 SET time_archived = ? WHERE id = ?").run(time, sessionID)
     return { changed: true, before }
   } catch (e) {
     if (e instanceof SessionsError) throw e
